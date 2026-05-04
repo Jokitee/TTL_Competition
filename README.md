@@ -36,15 +36,14 @@ python export_to_c.py
 ### 3. 部署到 STM32 工程
 将以下三个文件拷贝至你的 STM32 工程目录中（如 `Core/Src` 及 `Core/Inc`）：
 1. `model_weights.h` (刚刚生成的权重文件)
-2. `nn_inference.c` (推理引擎及特征提取)
-3. `uart_ai_handler.c` (串口通信调度)
+2. `nn_inference.c`、`nn_inference.h` (推理引擎及特征提取)
+3. `uart_ai_handler.c`、`uart_ai_handler.h`(串口通信调度)
 
 ### 4. STM32 代码集成
 在你的 `main.c` 中开启 UART1 接收中断：
 
 ```c
-extern void AI_UART_Init(void);
-extern void AI_UART_RxCallback(void);
+#include "uart_ai_handler.h"
 
 int main(void) {
     // ... 其他初始化代码 ...
@@ -95,3 +94,8 @@ STM32 通过 UART1 接收裁判系统或上位机发来的当前战局数据，�
 ## 💡 开发提示
 * 如果你需要在 C 语言中维护冷却时间（避免 AI 发射频率超过游戏限制），请在 `uart_ai_handler.c` 中结合定时器中断自行对 `self_cd` 进行递减。
 * `combat_logic.c` 是一个不依赖神经网络的硬编码简单逻辑，如果你使用 AI 模型，则无需将该文件烧录进单片机。
+
+
+## 改进方向
+
+当前的训练结果偏于直线solo，没有智能决策，
