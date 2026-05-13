@@ -5,23 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="b0bcbb39-8ce7-47d7-811e-456594111af3" name="更改" comment="">
-      <change afterPath="$PROJECT_DIR$/analytics.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/human_vs_ai_train.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/realtime_plot.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/reward_config.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/reward_distribution.png" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/reward_logs.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/reward_logs.jsonl" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/train_config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/best_model.pkl" beforeDir="false" afterPath="$PROJECT_DIR$/best_model.pkl" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/export_to_c.py" beforeDir="false" afterPath="$PROJECT_DIR$/export_to_c.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/game_env.py" beforeDir="false" afterPath="$PROJECT_DIR$/game_env.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/human_vs_ai.py" beforeDir="false" afterPath="$PROJECT_DIR$/human_vs_ai.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/human_vs_ai_train.py" beforeDir="false" afterPath="$PROJECT_DIR$/human_vs_ai_train.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/nn_inference.c" beforeDir="false" afterPath="$PROJECT_DIR$/nn_inference.c" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/nn_inference.h" beforeDir="false" afterPath="$PROJECT_DIR$/nn_inference.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/train_ga.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_ga.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/train_ppo.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_ppo.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/uart_ai_handler.c" beforeDir="false" afterPath="$PROJECT_DIR$/uart_ai_handler.c" afterDir="false" />
     </list>
@@ -41,22 +30,22 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.export_to_c.executor": "Run",
-    "Python.human_vs_ai.executor": "Run",
-    "Python.human_vs_ai_train.executor": "Run",
-    "Python.realtime_plot.executor": "Run",
-    "Python.train_config.executor": "Run",
-    "Python.train_ga.executor": "Run",
-    "Python.train_ppo.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "Test",
-    "last_opened_file_path": "E:/Test_FIre"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.export_to_c.executor&quot;: &quot;Run&quot;,
+    &quot;Python.human_vs_ai.executor&quot;: &quot;Run&quot;,
+    &quot;Python.human_vs_ai_train.executor&quot;: &quot;Run&quot;,
+    &quot;Python.realtime_plot.executor&quot;: &quot;Run&quot;,
+    &quot;Python.train_config.executor&quot;: &quot;Run&quot;,
+    &quot;Python.train_ga.executor&quot;: &quot;Run&quot;,
+    &quot;Python.train_ppo.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;Test&quot;,
+    &quot;last_opened_file_path&quot;: &quot;E:/Test_FIre&quot;
   }
-}]]></component>
+}</component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>

@@ -32,6 +32,7 @@ def to_c_array(name, arr):
         return f"const float {name}[{s[0]}] = {{{vals}}};\n"
     return f"const float {name}[{s[0]}][{s[1]}] = {{{vals}}};\n"
 
+# v3.0 离散动作版：W4(32,7) = mv(3)+rt(3)+fire(1)
 arch = f"{W1.shape[0]}-{W1.shape[1]}-{W2.shape[1]}-{W3.shape[1]}-{W4.shape[1]}"
 total = sum(x.size for x in [W1,B1,W2,B2,W3,B3,W4,B4])
 

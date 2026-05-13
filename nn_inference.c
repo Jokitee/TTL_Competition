@@ -7,8 +7,13 @@
 #endif
 
 // ============================================================
-// 神经网络推理：16输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 3输出
-// 参数量: 5910，适配 STM32F103C8T6 (64KB Flash)
+// 神经经网络推理：16输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 7输出
+// 参数量: 6166，适配 STM32F103C8T6 (64KB Flash)
+//
+// 输出层（7维，全部离散动作）:
+//   actions[0~2] mv_logits  移动{停止, 前进, 后退}  → argmax → {-1, 0, +1}
+//   actions[3~5] rt_logits  旋转{不转, 左转, 右转}  → argmax → {-1, 0, +1}
+//   actions[6]   fire_logit 开火 logit              → >0 则开火
 //
 // 观测输入（16维，与 Python get_relative_obs 严格一致）:
 //  obs[0]  dist         相对距离        (0~1)
@@ -28,8 +33,22 @@
 //  obs[14] dist_rate    距离变化率       (-1~1)
 //  obs[15] vel_perp     敌方垂直视线速度 (-1~1，预判射击关键)
 // ============================================================
+
+// 离散动作映射：索引 → 实际动作值
+// mv: 0=停止(0), 1=前进(+1), 2=后退(-1)
+// rt: 0=不转(0), 1=左转(+1), 2=右转(-1)
+static const float MV_MAP[3] = {0.0f, 1.0f, -1.0f};
+static const float RT_MAP[3] = {0.0f, 1.0f, -1.0f};
+
+/**
+ * @brief  神经网络推理（离散动作版）
+ * @param  obs     16维归一化观测向量
+ * @param  actions 3维输出 (mv, rt, fire)
+ *                  mv/rt ∈ {-1, 0, +1}，fire ∈ {0, 1}
+ */
 void nn_inference(const float obs[16], float actions[3]) {
     float h1[64], h2[48], h3[32];
+    float logits[7];  // mv(3) + rt(3) + fire(1)
 
     // 1. 输入层 → 隐藏层1 (16 → 64)
     for (int j = 0; j < 64; j++) {
@@ -52,19 +71,32 @@ void nn_inference(const float obs[16], float actions[3]) {
         h3[j] = tanhf(h3[j]);
     }
 
-    // 4. 隐藏层3 → 输出层 (32 → 3)
-    for (int j = 0; j < 3; j++) {
-        actions[j] = B4[j];
-        for (int i = 0; i < 32; i++) actions[j] += h3[i] * W4[i][j];
+    // 4. 隐藏层3 → 输出层 (32 → 7)
+    for (int j = 0; j < 7; j++) {
+        logits[j] = B4[j];
+        for (int i = 0; i < 32; i++) logits[j] += h3[i] * W4[i][j];
     }
 
-    actions[0] = tanhf(actions[0]);  // mv: 移动量  [-1, 1]
-    actions[1] = tanhf(actions[1]);  // rt: 旋转量  [-1, 1]
-    // actions[2] > 0 开火
+    // 5. 离散动作：argmax 解码
+    //    mv_logits = logits[0..2], rt_logits = logits[3..5], fire_logit = logits[6]
+
+    // mv argmax: 找 logits[0], logits[1], logits[2] 中最大值的索引
+    int mv_idx = 0;
+    if (logits[1] > logits[mv_idx]) mv_idx = 1;
+    if (logits[2] > logits[mv_idx]) mv_idx = 2;
+
+    // rt argmax: 找 logits[3], logits[4], logits[5] 中最大值的索引
+    int rt_idx = 0;
+    if (logits[4] > logits[3]) rt_idx = 1;
+    if (logits[5] > logits[3 + rt_idx]) rt_idx = 2;
+
+    actions[0] = MV_MAP[mv_idx];   // 移动: -1, 0, +1
+    actions[1] = RT_MAP[rt_idx];   // 旋转: -1, 0, +1
+    actions[2] = (logits[6] > 0.0f) ? 1.0f : 0.0f;  // 开火
 }
 
 // ============================================================
-// 特征工程：绝对坐标 → 15维相对特征
+// 特征工程：绝对坐标 → 16维相对特征
 // 须与 Python get_relative_obs() 保持严格一致
 //
 // 参数:
@@ -162,6 +194,8 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
     float actions[3];
     nn_inference(obs, actions);
 
-    // 将 actions[0](mv), actions[1](rt), actions[2]>0(fire) 输出
-    // send_to_uart(actions[0], actions[1], actions[2] > 0.0f ? 1 : 0);
+    // actions[0] = mv ∈ {-1, 0, +1}
+    // actions[1] = rt ∈ {-1, 0, +1}
+    // actions[2] = fire ∈ {0, 1}
+    // send_to_uart(actions[0], actions[1], actions[2]);
 }

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from game_env import LinkCombatEnv
-from train_ppo import ActorCritic, compute_gae, ppo_update, RunningStats
+from train_ppo import ActorCritic, compute_gae, ppo_update, RunningStats, MV_MAP, RT_MAP
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -86,12 +86,23 @@ def main():
                 policy.backbone[4].weight.copy_(torch.FloatTensor(W3.T))
                 policy.backbone[4].bias.copy_(  torch.FloatTensor(B3))
                 
-                policy.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:1].T))
-                policy.mv_head.bias.copy_(      torch.FloatTensor([B4[0]]))
-                policy.rt_head.weight.copy_(    torch.FloatTensor(W4[:,1:2].T))
-                policy.rt_head.bias.copy_(      torch.FloatTensor([B4[1]]))
-                policy.fire_head.weight.copy_(  torch.FloatTensor(W4[:,2:3].T))
-                policy.fire_head.bias.copy_(    torch.FloatTensor([B4[2]]))
+                # 自动检测 W4 格式：v3.0 离散(32,7) vs 旧版连续(32,3)
+                if W4.shape[1] == 7:
+                    # v3.0 离散动作版：mv(3) + rt(3) + fire(1)
+                    policy.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:3].T))
+                    policy.mv_head.bias.copy_(      torch.FloatTensor(B4[0:3]))
+                    policy.rt_head.weight.copy_(    torch.FloatTensor(W4[:,3:6].T))
+                    policy.rt_head.bias.copy_(      torch.FloatTensor(B4[3:6]))
+                    policy.fire_head.weight.copy_(  torch.FloatTensor(W4[:,6:7].T))
+                    policy.fire_head.bias.copy_(    torch.FloatTensor(B4[6:7]))
+                else:
+                    # 旧版连续动作：mv(1) + rt(1) + fire(1) = (32,3)
+                    policy.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:1].T))
+                    policy.mv_head.bias.copy_(      torch.FloatTensor([B4[0]]))
+                    policy.rt_head.weight.copy_(    torch.FloatTensor(W4[:,1:2].T))
+                    policy.rt_head.bias.copy_(      torch.FloatTensor([B4[1]]))
+                    policy.fire_head.weight.copy_(  torch.FloatTensor(W4[:,2:3].T))
+                    policy.fire_head.bias.copy_(    torch.FloatTensor([B4[2]]))
     else:
         print("未找到现有模型，从头开始训练...")
 
@@ -103,14 +114,14 @@ def main():
     IN_DIM = 16  # 与 game_env 和 train_ppo 保持一致（16维：含vel_perp预判射击特征）
     N_STEPS = 1024 # 每积累 1024 步进行一次 PPO 更新 (约17秒游戏时间)
     
-    buf_obs   = np.zeros((N_STEPS, 1, IN_DIM), dtype=np.float32)
-    buf_mv    = np.zeros((N_STEPS, 1), dtype=np.float32)
-    buf_rt    = np.zeros((N_STEPS, 1), dtype=np.float32)
-    buf_fire  = np.zeros((N_STEPS, 1), dtype=np.float32)
-    buf_logp  = np.zeros((N_STEPS, 1), dtype=np.float32)
-    buf_val   = np.zeros((N_STEPS, 1), dtype=np.float32)
-    buf_rew   = np.zeros((N_STEPS, 1), dtype=np.float32)
-    buf_done  = np.zeros((N_STEPS, 1), dtype=np.float32)
+    buf_obs    = np.zeros((N_STEPS, 1, IN_DIM), dtype=np.float32)
+    buf_mv_idx = np.zeros((N_STEPS, 1), dtype=np.float32)   # 离散索引 {0,1,2}
+    buf_rt_idx = np.zeros((N_STEPS, 1), dtype=np.float32)   # 离散索引 {0,1,2}
+    buf_fire   = np.zeros((N_STEPS, 1), dtype=np.float32)
+    buf_logp   = np.zeros((N_STEPS, 1), dtype=np.float32)
+    buf_val    = np.zeros((N_STEPS, 1), dtype=np.float32)
+    buf_rew    = np.zeros((N_STEPS, 1), dtype=np.float32)
+    buf_done   = np.zeros((N_STEPS, 1), dtype=np.float32)
 
     step_idx = 0
     update_count = 0
@@ -135,28 +146,30 @@ def main():
         policy.eval()
         obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
         with torch.no_grad():
-            mv, rt, fire, logp, value = policy.act(obs_tensor)
+            mv, rt, fire, mv_idx, rt_idx, logp, value = policy.act(obs_tensor)
         
-        mv_np   = mv.cpu().numpy()[0]
-        rt_np   = rt.cpu().numpy()[0]
-        fire_np = fire.cpu().numpy()[0]
-        logp_np = logp.cpu().numpy()[0]
-        val_np  = value.cpu().numpy()[0]
+        mv_np      = mv.cpu().numpy()[0]
+        rt_np      = rt.cpu().numpy()[0]
+        fire_np    = fire.cpu().numpy()[0]
+        mv_idx_np  = mv_idx.cpu().numpy()[0]
+        rt_idx_np  = rt_idx.cpu().numpy()[0]
+        logp_np    = logp.cpu().numpy()[0]
+        val_np     = value.cpu().numpy()[0]
         
         action1 = np.array([mv_np, rt_np, fire_np], dtype=np.float32)
         action2 = human_action(keys)
         
         next_obs, reward, done = env.step(action1, action2)
         
-        # 记录经验
-        buf_obs[step_idx, 0]  = obs
-        buf_mv[step_idx, 0]   = mv_np
-        buf_rt[step_idx, 0]   = rt_np
-        buf_fire[step_idx, 0] = fire_np
-        buf_logp[step_idx, 0] = logp_np
-        buf_val[step_idx, 0]  = val_np
-        buf_rew[step_idx, 0]  = reward
-        buf_done[step_idx, 0] = float(done)
+        # 记录经验（存储离散索引供 evaluate 使用）
+        buf_obs[step_idx, 0]    = obs
+        buf_mv_idx[step_idx, 0] = mv_idx_np
+        buf_rt_idx[step_idx, 0] = rt_idx_np
+        buf_fire[step_idx, 0]   = fire_np
+        buf_logp[step_idx, 0]   = logp_np
+        buf_val[step_idx, 0]    = val_np
+        buf_rew[step_idx, 0]    = reward
+        buf_done[step_idx, 0]   = float(done)
         
         step_idx += 1
         obs = next_obs
@@ -186,8 +199,8 @@ def main():
             
             batch = (
                 buf_obs.reshape(-1, IN_DIM),
-                buf_mv.flatten(),
-                buf_rt.flatten(),
+                buf_mv_idx.flatten(),
+                buf_rt_idx.flatten(),
                 buf_fire.flatten(),
                 buf_logp.flatten(),
                 advantages,

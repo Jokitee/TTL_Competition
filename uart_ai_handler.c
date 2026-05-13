@@ -1,7 +1,7 @@
 /**
  * uart_ai_handler.c
  * 
- * STM32 UART5 AI 推理接入代码
+ * STM32 UART5 AI 推理接入代码 (离散动作版 v3.0)
  * 协议：接收游戏状态 -> 推理 -> 发送控制指令
  * 
  * 输入帧 (上位机→STM32): {"p1":{"x":50,"y":50,"a":45,"hp":100},"p2":{"x":50,"y":50,"a":45,"hp":100}}\n
@@ -83,7 +83,7 @@ static void process_uart_frame(char *frame) {
     enemy_x = p2_x;  enemy_y = p2_y;  enemy_a = p2_a;  enemy_hp = p2_hp;
 #endif
 
-    // ================== 特征工程 (15维，与 get_relative_obs 严格一致) ==================
+    // ================== 特征工程 (16维，与 get_relative_obs 严格一致) ==================
     const float PLAYER_RADIUS = 20.0f;
     const float ARENA_SIZE    = 500.0f;
     const float PLAYER_SPEED  = 3.0f;
@@ -126,10 +126,13 @@ static void process_uart_frame(char *frame) {
     float evx = cosf(enemy_rad) * PLAYER_SPEED;
     float evy = sinf(enemy_rad) * PLAYER_SPEED;
     float vel_along = 0.0f;
+    float vel_perp  = 0.0f;
     if (dist > 0.001f) {
         vel_along = (evx * dx + evy * dy) / dist;
+        vel_perp  = (-evx * dy + evy * dx) / dist;  // 切向速度（预判射击关键）
     }
     vel_along /= PLAYER_SPEED;  // 归一化到 [-1, 1]
+    vel_perp  /= PLAYER_SPEED;  // 归一化到 [-1, 1]
 
     // 6. 距离变化率（远程索敌关键特征）
     static float prev_dist = -1.0f;  // 跨帧保持
@@ -139,8 +142,8 @@ static void process_uart_frame(char *frame) {
     }
     prev_dist = dist;
 
-    // 7. 组装15维观测向量
-    float obs[15] = {
+    // 7. 组装16维观测向量
+    float obs[16] = {
         dist / 707.0f,          // 0.  相对距离
         angle_diff / 180.0f,    // 1.  我方枪口误差（有符号）
         dx / ARENA_SIZE,        // 2.  dx
@@ -155,23 +158,22 @@ static void process_uart_frame(char *frame) {
         cosf(rad_enemy),        // 11. 敌人朝向 cos
         0.0f,                   // 12. CD 设为0
         vel_along,              // 13. 敌方沿视线方向速度（-1~1）
-        dist_rate               // 14. 距离变化率（-1~1）
+        dist_rate,              // 14. 距离变化率（-1~1）
+        vel_perp                // 15. 敌方垂直视线速度（-1~1，预判射击关键）
     };
 
     // ================== 执行推理 ==================
     float actions[3];
     nn_inference(obs, actions);
 
-    // ================== 动作离散化 ==================
-    int mv = 0, rt = 0, fr = 0;
-    
-    if (actions[0] > 0.3f) mv = 1;
-    else if (actions[0] < -0.3f) mv = -1;
-
-    if (actions[1] > 0.3f) rt = 1;
-    else if (actions[1] < -0.3f) rt = -1;
-
-    fr = 1;  // 始终开火
+    // ================== 动作输出（已经是离散值）==================
+    // nn_inference 已返回离散动作:
+    //   actions[0] = mv ∈ {-1, 0, +1}
+    //   actions[1] = rt ∈ {-1, 0, +1}
+    //   actions[2] = fire ∈ {0, 1}
+    int mv = (int)actions[0];
+    int rt = (int)actions[1];
+    int fr = (actions[2] > 0.5f) ? 1 : 0;
 
     // 输出帧: {"mv":0,"rt":0,"fr":0}\n
     snprintf(tx_buf, TX_BUF_SIZE, "{\"mv\":%d,\"rt\":%d,\"fr\":%d}\n", mv, rt, fr);

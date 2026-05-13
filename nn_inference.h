@@ -6,9 +6,12 @@ extern "C" {
 #endif
 
 /**
- * @brief  神经网络推理：16输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 3输出
+ * @brief  神经网络推理（离散动作版）：16输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 7输出
  * @param  obs     16维归一化观测向量（含vel_perp预判射击特征）
- * @param  actions 3维输出 (mv, rt, fire_logit)
+ * @param  actions 3维输出 (mv, rt, fire)
+ *                  mv ∈ {-1, 0, +1}  停止/前进/后退
+ *                  rt ∈ {-1, 0, +1}  不转/左转/右转
+ *                  fire ∈ {0, 1}     不开火/开火
  */
 void nn_inference(const float obs[16], float actions[3]);
 
@@ -29,4 +32,3 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
 #endif
 
 #endif /* __NN_INFERENCE_H */
-											 
