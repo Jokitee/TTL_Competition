@@ -4,16 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="b0bcbb39-8ce7-47d7-811e-456594111af3" name="更改" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/export_to_c.py" beforeDir="false" afterPath="$PROJECT_DIR$/export_to_c.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/human_vs_ai_train.py" beforeDir="false" afterPath="$PROJECT_DIR$/human_vs_ai_train.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nn_inference.c" beforeDir="false" afterPath="$PROJECT_DIR$/nn_inference.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nn_inference.h" beforeDir="false" afterPath="$PROJECT_DIR$/nn_inference.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/train_ppo.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_ppo.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uart_ai_handler.c" beforeDir="false" afterPath="$PROJECT_DIR$/uart_ai_handler.c" afterDir="false" />
-    </list>
+    <list default="true" id="b0bcbb39-8ce7-47d7-811e-456594111af3" name="更改" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
