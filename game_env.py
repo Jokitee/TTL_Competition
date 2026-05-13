@@ -74,6 +74,7 @@ class LinkCombatEnv:
         self.p2_dist  = 0.0
         self.prev_dist = math.hypot(self.p2[0]-self.p1[0],
                                     self.p2[1]-self.p1[1])
+        self.prev_obs_dist = self.prev_dist   # 用于计算dist_rate特征
         return self._get_obs()
 
     def get_relative_obs(self, p_self, p_enemy):
@@ -96,6 +97,27 @@ class LinkCombatEnv:
         rs   = math.radians(p_self[2]); re = math.radians(p_enemy[2])
         cd   = p_self[4] / self.fire_cooldown
 
+        # 新增：速度感知特征（远程索敌关键信息）
+        # 敌方移动方向在观测者坐标系中的分量
+        enemy_rad = math.radians(p_enemy[2])
+        evx = math.cos(enemy_rad) * self.player_speed  # 敌方速度x分量
+        evy = math.sin(enemy_rad) * self.player_speed  # 敌方速度y分量
+        # 投射到"观测者→敌方"方向线上（正=远离，负=接近）
+        if dist > 1e-6:
+            vel_along = (evx * dx + evy * dy) / dist
+            # 垂直速度分量（正=向左移动，负=向右移动，相对于视线方向）
+            # 这是远程预判射击的关键特征
+            vel_perp  = (-evx * dy + evy * dx) / dist
+        else:
+            vel_along = 0.0
+            vel_perp  = 0.0
+        # 距离变化率（正=远离，负=接近）
+        if hasattr(self, 'prev_obs_dist'):
+            dist_rate = (dist - self.prev_obs_dist) / max(self.player_speed * 2, 1.0)
+        else:
+            dist_rate = 0.0
+        self.prev_obs_dist = dist
+
         return np.array([
             dist / 707.0,
             angle_diff / 180.0,
@@ -106,6 +128,9 @@ class LinkCombatEnv:
             math.sin(rs), math.cos(rs),
             math.sin(re), math.cos(re),
             cd,
+            vel_along / self.player_speed,   # 敌方径向速度分量（归一化）
+            dist_rate,                        # 距离变化率（归一化）
+            vel_perp / self.player_speed,    # 敌方切向速度分量（预判射击关键）
         ], dtype=np.float32)
 
     def _get_obs(self):
@@ -144,32 +169,51 @@ class LinkCombatEnv:
             else:
                 aim_err = angle_diff
             
+            # 远程模式使用预判瞄准误差（lead aim）评估开火质量
+            # 核心改进：远程子弹需要预判，不应只看当前位置的angle_diff
+            if dist > 1e-6:
+                enemy_rad_fire = math.radians(self.p2[2])
+                evx_f = math.cos(enemy_rad_fire) * self.player_speed
+                evy_f = math.sin(enemy_rad_fire) * self.player_speed
+                t_int = dist / self.bullet_speed
+                px_f = self.p2[0] + evx_f * t_int
+                py_f = self.p2[1] + evy_f * t_int
+                lead_tgt_fire = math.degrees(math.atan2(py_f - self.p1[1], px_f - self.p1[0])) % 360.0
+                lead_err_fire = abs((lead_tgt_fire - self.p1[2] + 180.0) % 360.0 - 180.0)
+                vp_f = abs(-evx_f * dy + evy_f * dx) / dist
+                lw_f = min(1.0, vp_f / self.player_speed) * min(1.0, dist / 300.0)
+                fire_aim_err = aim_err * (1.0 - lw_f) + lead_err_fire * lw_f
+            else:
+                fire_aim_err = aim_err
+            
             # 动态距离判断：强化远距离射击的精准度与稳定性
             if dist > getattr(RewardConfig, "DISTANCE_THRESHOLD", 200.0):
-                # 远程抽射模式：对瞄准要求极高，奖励更丰厚
-                if aim_err <= 2.0:  
+                # 远程抽射模式：使用预判误差，同时放宽容差鼓励开火
+                long_perfect = getattr(RewardConfig, "LONG_RANGE_PERFECT_THRESHOLD", 5.0)
+                long_good    = getattr(RewardConfig, "LONG_RANGE_GOOD_THRESHOLD", 15.0)
+                if fire_aim_err <= long_perfect:  
                     step_reward += RewardConfig.FIRE_PERFECT_AIM * 1.5
                     if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM * 1.5)
                     if blind: 
                         step_reward += RewardConfig.FIRE_PERFECT_AIM_BLIND * 1.5
                         if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM_BLIND * 1.5)
-                elif aim_err <= 5.0:
-                    r = (5.0-aim_err)/5.0 * RewardConfig.FIRE_GOOD_AIM_MAX * 1.5
+                elif fire_aim_err <= long_good:
+                    r = (long_good-fire_aim_err)/long_good * RewardConfig.FIRE_GOOD_AIM_MAX * 1.5
                     step_reward += r
                     if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", r)
                 else:
-                    step_reward += RewardConfig.FIRE_BAD_AIM_PENALTY * 2.0
-                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_BAD_AIM_PENALTY * 2.0)
+                    step_reward += RewardConfig.FIRE_BAD_AIM_PENALTY
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_BAD_AIM_PENALTY)
             else:
                 # 贴近近战模式：容错率稍高
-                if aim_err <= 5.0:  
+                if fire_aim_err <= 5.0:  
                     step_reward += RewardConfig.FIRE_PERFECT_AIM
                     if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM)
                     if blind: 
                         step_reward += RewardConfig.FIRE_PERFECT_AIM_BLIND
                         if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM_BLIND)
-                elif aim_err <= 12.0:
-                    r = (12.0-aim_err)/12.0 * RewardConfig.FIRE_GOOD_AIM_MAX
+                elif fire_aim_err <= 12.0:
+                    r = (12.0-fire_aim_err)/12.0 * RewardConfig.FIRE_GOOD_AIM_MAX
                     step_reward += r
                     if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", r)
                 else:
@@ -231,8 +275,30 @@ class LinkCombatEnv:
         else:
             aim_err = angle_diff
         
-        # 积极瞄准策略核心：缩紧瞄准容差，强化"死盯"对手的奖励
-        aim_f  = max(0.0, 1.0 - aim_err/30.0)  # 攻击准确：有效瞄准区缩小到30度
+        # ── 预判瞄准（Lead Aim）计算 ──────────────────────────
+        # 核心改进：远程不再瞄准敌人当前位置，而是瞄准子弹到达时敌人的预测位置
+        # 解决远程子弹命中率极低的根本问题
+        enemy_rad = math.radians(self.p2[2])
+        evx = math.cos(enemy_rad) * self.player_speed
+        evy = math.sin(enemy_rad) * self.player_speed
+        if dist > 1e-6:
+            t_intercept = dist / self.bullet_speed  # 子弹飞行时间（帧）
+            pred_x = self.p2[0] + evx * t_intercept  # 预测敌人位置
+            pred_y = self.p2[1] + evy * t_intercept
+            lead_tgt = math.degrees(math.atan2(pred_y - self.p1[1], pred_x - self.p1[0])) % 360.0
+            lead_aim_err = abs((lead_tgt - self.p1[2] + 180.0) % 360.0 - 180.0)
+            # 切向速度越大、距离越远 → lead_aim 修正越重要
+            vel_perp_abs = abs(-evx * dy + evy * dx) / dist
+            lead_weight = min(1.0, vel_perp_abs / self.player_speed) * min(1.0, dist / 300.0)
+        else:
+            lead_aim_err = aim_err
+            lead_weight = 0.0
+        
+        # 综合瞄准误差：近距离用直接瞄准，远距离用预判瞄准
+        effective_aim_err = aim_err * (1.0 - lead_weight) + lead_aim_err * lead_weight
+        
+        # 积极瞄准策略核心：用综合误差（含预判）评估
+        aim_f  = max(0.0, 1.0 - effective_aim_err/30.0)  # 攻击准确：有效瞄准区缩小到30度
         
         # ==== 动态距离感知与策略切换 ====
         dist_threshold = getattr(RewardConfig, "DISTANCE_THRESHOLD", 200.0)
@@ -267,6 +333,21 @@ class LinkCombatEnv:
         r_dist_maintain = dist_f * dist_maintain_base
         step_reward += r_dist_maintain
         if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_dist_maintain)
+
+        # 远程瞄准跟踪额外奖励：用effective_aim_err（含预判）评估远程瞄准
+        if dist > dist_threshold and effective_aim_err < 25.0:
+            lr_track_bonus = (25.0 - effective_aim_err) / 25.0 * getattr(RewardConfig, "LONG_RANGE_TRACK_BONUS", 8.0)
+            step_reward += lr_track_bonus
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", lr_track_bonus)
+        
+        # ── 预判瞄准专项奖励 ──────────────────────────────────
+        # 当敌人正在移动且AI正在瞄准预测位置时，给予额外奖励
+        if dist > dist_threshold and lead_weight > 0.1:
+            lead_reward_mult = getattr(RewardConfig, "LEAD_AIM_REWARD", 6.0)
+            if effective_aim_err < 15.0:
+                r_lead = (15.0 - effective_aim_err) / 15.0 * lead_reward_mult * lead_weight
+                step_reward += r_lead
+                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", r_lead)
         
         # 太近惩罚：防止在远程模式下紧贴对手
         if dist < 150.0 and too_close_penalty < 0:

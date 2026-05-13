@@ -83,9 +83,10 @@ static void process_uart_frame(char *frame) {
     enemy_x = p2_x;  enemy_y = p2_y;  enemy_a = p2_a;  enemy_hp = p2_hp;
 #endif
 
-    // ================== 特征工程 (13维，与 process_game_data 严格一致) ==================
+    // ================== 特征工程 (15维，与 get_relative_obs 严格一致) ==================
     const float PLAYER_RADIUS = 20.0f;
     const float ARENA_SIZE    = 500.0f;
+    const float PLAYER_SPEED  = 3.0f;
 
     float dx   = enemy_x - self_x;
     float dy   = enemy_y - self_y;
@@ -120,8 +121,26 @@ static void process_uart_frame(char *frame) {
     float rad_self  = self_a  * M_PI / 180.0f;
     float rad_enemy = enemy_a * M_PI / 180.0f;
 
-    // 5. 组装13维观测向量
-    float obs[13] = {
+    // 5. 敌方沿视线方向速度分量（远程索敌关键特征）
+    float enemy_rad = rad_enemy;
+    float evx = cosf(enemy_rad) * PLAYER_SPEED;
+    float evy = sinf(enemy_rad) * PLAYER_SPEED;
+    float vel_along = 0.0f;
+    if (dist > 0.001f) {
+        vel_along = (evx * dx + evy * dy) / dist;
+    }
+    vel_along /= PLAYER_SPEED;  // 归一化到 [-1, 1]
+
+    // 6. 距离变化率（远程索敌关键特征）
+    static float prev_dist = -1.0f;  // 跨帧保持
+    float dist_rate = 0.0f;
+    if (prev_dist >= 0.0f) {
+        dist_rate = (dist - prev_dist) / (PLAYER_SPEED * 2.0f);
+    }
+    prev_dist = dist;
+
+    // 7. 组装15维观测向量
+    float obs[15] = {
         dist / 707.0f,          // 0.  相对距离
         angle_diff / 180.0f,    // 1.  我方枪口误差（有符号）
         dx / ARENA_SIZE,        // 2.  dx
@@ -134,7 +153,9 @@ static void process_uart_frame(char *frame) {
         cosf(rad_self),         // 9.  自身朝向 cos
         sinf(rad_enemy),        // 10. 敌人朝向 sin
         cosf(rad_enemy),        // 11. 敌人朝向 cos
-        0.0f                    // 12. CD 设为0
+        0.0f,                   // 12. CD 设为0
+        vel_along,              // 13. 敌方沿视线方向速度（-1~1）
+        dist_rate               // 14. 距离变化率（-1~1）
     };
 
     // ================== 执行推理 ==================

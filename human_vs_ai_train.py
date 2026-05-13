@@ -63,19 +63,35 @@ def main():
     if os.path.exists(MODEL_PATH):
         print("加载现有模型进行实时对抗训练...")
         with open(MODEL_PATH, 'rb') as f:
-            W1,B1,W2,B2,W3,B3 = pickle.load(f)
+            weights = pickle.load(f)
         with torch.no_grad():
-            policy.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
-            policy.backbone[0].bias.copy_(  torch.FloatTensor(B1))
-            policy.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
-            policy.backbone[2].bias.copy_(  torch.FloatTensor(B2))
-            
-            policy.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
-            policy.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
-            policy.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
-            policy.rt_head.bias.copy_(      torch.FloatTensor([B3[1]]))
-            policy.fire_head.weight.copy_(  torch.FloatTensor(W3[:,2:3].T))
-            policy.fire_head.bias.copy_(    torch.FloatTensor([B3[2]]))
+            if len(weights) == 6:
+                W1,B1,W2,B2,W3,B3 = weights
+                policy.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
+                policy.backbone[0].bias.copy_(  torch.FloatTensor(B1))
+                policy.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
+                policy.backbone[2].bias.copy_(  torch.FloatTensor(B2))
+                policy.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
+                policy.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
+                policy.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
+                policy.rt_head.bias.copy_(      torch.FloatTensor([B3[1]]))
+                policy.fire_head.weight.copy_(  torch.FloatTensor(W3[:,2:3].T))
+                policy.fire_head.bias.copy_(    torch.FloatTensor([B3[2]]))
+            else:
+                W1,B1,W2,B2,W3,B3,W4,B4 = weights
+                policy.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
+                policy.backbone[0].bias.copy_(  torch.FloatTensor(B1))
+                policy.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
+                policy.backbone[2].bias.copy_(  torch.FloatTensor(B2))
+                policy.backbone[4].weight.copy_(torch.FloatTensor(W3.T))
+                policy.backbone[4].bias.copy_(  torch.FloatTensor(B3))
+                
+                policy.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:1].T))
+                policy.mv_head.bias.copy_(      torch.FloatTensor([B4[0]]))
+                policy.rt_head.weight.copy_(    torch.FloatTensor(W4[:,1:2].T))
+                policy.rt_head.bias.copy_(      torch.FloatTensor([B4[1]]))
+                policy.fire_head.weight.copy_(  torch.FloatTensor(W4[:,2:3].T))
+                policy.fire_head.bias.copy_(    torch.FloatTensor([B4[2]]))
     else:
         print("未找到现有模型，从头开始训练...")
 
@@ -84,7 +100,7 @@ def main():
     reward_stats = RunningStats()
 
     # 经验回放缓冲区 (针对单个环境)
-    IN_DIM = 13
+    IN_DIM = 16  # 与 game_env 和 train_ppo 保持一致（16维：含vel_perp预判射击特征）
     N_STEPS = 1024 # 每积累 1024 步进行一次 PPO 更新 (约17秒游戏时间)
     
     buf_obs   = np.zeros((N_STEPS, 1, IN_DIM), dtype=np.float32)

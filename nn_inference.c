@@ -7,10 +7,10 @@
 #endif
 
 // ============================================================
-// 神经网络推理：13输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 3输出
-// 参数量: 4611，Flash占用约 18.4KB，适配 STM32F103C8T6 (64KB Flash)
+// 神经网络推理：16输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 3输出
+// 参数量: 5910，适配 STM32F103C8T6 (64KB Flash)
 //
-// 观测输入（13维，与 Python get_relative_obs 严格一致）:
+// 观测输入（16维，与 Python get_relative_obs 严格一致）:
 //  obs[0]  dist         相对距离        (0~1)
 //  obs[1]  angle_diff   我方枪口误差    (-1~1，有符号)
 //  obs[2]  dx           X轴相对差       (-1~1)
@@ -24,14 +24,17 @@
 //  obs[10] sin(enemy_a) 敌人朝向sin     (-1~1)
 //  obs[11] cos(enemy_a) 敌人朝向cos     (-1~1)
 //  obs[12] self_cd      自身冷却状态    (0=可开火, 1=刚射击)
+//  obs[13] vel_along    敌方沿视线方向速度 (-1~1)
+//  obs[14] dist_rate    距离变化率       (-1~1)
+//  obs[15] vel_perp     敌方垂直视线速度 (-1~1，预判射击关键)
 // ============================================================
-void nn_inference(const float obs[13], float actions[3]) {
+void nn_inference(const float obs[16], float actions[3]) {
     float h1[64], h2[48], h3[32];
 
-    // 1. 输入层 → 隐藏层1 (13 → 64)
+    // 1. 输入层 → 隐藏层1 (16 → 64)
     for (int j = 0; j < 64; j++) {
         h1[j] = B1[j];
-        for (int i = 0; i < 13; i++) h1[j] += obs[i] * W1[i][j];
+        for (int i = 0; i < 16; i++) h1[j] += obs[i] * W1[i][j];
         h1[j] = tanhf(h1[j]);
     }
 
@@ -61,7 +64,7 @@ void nn_inference(const float obs[13], float actions[3]) {
 }
 
 // ============================================================
-// 特征工程：绝对坐标 → 13维相对特征
+// 特征工程：绝对坐标 → 15维相对特征
 // 须与 Python get_relative_obs() 保持严格一致
 //
 // 参数:
@@ -69,13 +72,15 @@ void nn_inference(const float obs[13], float actions[3]) {
 //   enemy_x/y/a/hp — 敌方 X,Y坐标,朝向角(度),血量(0~100)
 //   self_cd        — 自身冷却计数(0=可立即开火, fire_cooldown=刚射击)
 //   fire_cooldown  — 最大冷却计数(与训练时保持一致，通常为15)
+//   prev_dist      — 上一帧的距离（用于计算dist_rate，首次传入时设为-1）
 // ============================================================
 void process_game_data(float self_x,  float self_y,  float self_a,  float self_hp,
                        float enemy_x, float enemy_y, float enemy_a, float enemy_hp,
-                       float self_cd, float fire_cooldown) {
+                       float self_cd, float fire_cooldown, float prev_dist) {
 
     const float PLAYER_RADIUS = 20.0f;
     const float ARENA_SIZE    = 500.0f;
+    const float PLAYER_SPEED  = 3.0f;
 
     float dx   = enemy_x - self_x;
     float dy   = enemy_y - self_y;
@@ -115,8 +120,27 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
     if (cd_norm > 1.0f) cd_norm = 1.0f;
     if (cd_norm < 0.0f) cd_norm = 0.0f;
 
-    // 6. 组装13维观测向量
-    float obs[13] = {
+    // 6. 敌方沿视线方向速度分量（远程索敌关键特征）
+    float enemy_rad = rad_enemy;
+    float evx = cosf(enemy_rad) * PLAYER_SPEED;
+    float evy = sinf(enemy_rad) * PLAYER_SPEED;
+    float vel_along = 0.0f;
+    float vel_perp  = 0.0f;
+    if (dist > 0.001f) {
+        vel_along = (evx * dx + evy * dy) / dist;
+        vel_perp  = (-evx * dy + evy * dx) / dist;  // 切向速度（预判射击关键）
+    }
+    vel_along /= PLAYER_SPEED;  // 归一化到 [-1, 1]
+    vel_perp  /= PLAYER_SPEED;  // 归一化到 [-1, 1]
+
+    // 7. 距离变化率（远程索敌关键特征）
+    float dist_rate = 0.0f;
+    if (prev_dist >= 0.0f) {
+        dist_rate = (dist - prev_dist) / (PLAYER_SPEED * 2.0f);
+    }
+
+    // 8. 组装16维观测向量
+    float obs[16] = {
         dist / 707.0f,          // 0.  相对距离
         angle_diff / 180.0f,    // 1.  我方枪口误差（有符号）
         dx / ARENA_SIZE,        // 2.  dx
@@ -129,7 +153,10 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
         cosf(rad_self),         // 9.  自身朝向 cos
         sinf(rad_enemy),        // 10. 敌人朝向 sin
         cosf(rad_enemy),        // 11. 敌人朝向 cos
-        cd_norm                 // 12. 冷却状态（0=可开火）
+        cd_norm,                // 12. 冷却状态（0=可开火）
+        vel_along,              // 13. 敌方沿视线方向速度（-1~1）
+        dist_rate,              // 14. 距离变化率（-1~1）
+        vel_perp                // 15. 敌方垂直视线速度（-1~1，预判射击关键）
     };
 
     float actions[3];

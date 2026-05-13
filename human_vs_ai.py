@@ -61,20 +61,37 @@ def load_ppo_model(path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = ActorCritic().to(device)
     with open(path, 'rb') as f:
-        W1,B1,W2,B2,W3,B3 = pickle.load(f)
+        weights = pickle.load(f)
+    
     # 反向还原权重
     with torch.no_grad():
-        model.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
-        model.backbone[0].bias.copy_(  torch.FloatTensor(B1))
-        model.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
-        model.backbone[2].bias.copy_(  torch.FloatTensor(B2))
-        
-        model.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
-        model.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
-        model.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
-        model.rt_head.bias.copy_(      torch.FloatTensor([B3[1]]))
-        model.fire_head.weight.copy_(  torch.FloatTensor(W3[:,2:3].T))
-        model.fire_head.bias.copy_(    torch.FloatTensor([B3[2]]))
+        if len(weights) == 6:
+            W1,B1,W2,B2,W3,B3 = weights
+            model.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
+            model.backbone[0].bias.copy_(  torch.FloatTensor(B1))
+            model.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
+            model.backbone[2].bias.copy_(  torch.FloatTensor(B2))
+            model.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
+            model.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
+            model.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
+            model.rt_head.bias.copy_(      torch.FloatTensor([B3[1]]))
+            model.fire_head.weight.copy_(  torch.FloatTensor(W3[:,2:3].T))
+            model.fire_head.bias.copy_(    torch.FloatTensor([B3[2]]))
+        else:
+            W1,B1,W2,B2,W3,B3,W4,B4 = weights
+            model.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
+            model.backbone[0].bias.copy_(  torch.FloatTensor(B1))
+            model.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
+            model.backbone[2].bias.copy_(  torch.FloatTensor(B2))
+            model.backbone[4].weight.copy_(torch.FloatTensor(W3.T))
+            model.backbone[4].bias.copy_(  torch.FloatTensor(B3))
+            
+            model.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:1].T))
+            model.mv_head.bias.copy_(      torch.FloatTensor([B4[0]]))
+            model.rt_head.weight.copy_(    torch.FloatTensor(W4[:,1:2].T))
+            model.rt_head.bias.copy_(      torch.FloatTensor([B4[1]]))
+            model.fire_head.weight.copy_(  torch.FloatTensor(W4[:,2:3].T))
+            model.fire_head.bias.copy_(    torch.FloatTensor([B4[2]]))
     model.eval()
     def act(obs_np):
         return model.act_deterministic(obs_np)

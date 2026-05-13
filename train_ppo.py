@@ -1,6 +1,8 @@
 """
-train_ppo.py  —  PPO + 自博弈训练
-架构: 13-48-32-3 (Actor-Critic 共享骨干网络)
+train_ppo.py  —  PPO + 自博弈训练 v2.1
+架构: 16-64-48-32-3 (Actor-Critic 共享骨干网络)
+新增特征: vel_along + dist_rate + vel_perp(切向速度，预判射击关键)
+远程索敌优化 + 增强自博弈机制 + 预判瞄准
 导出权重与 nn_inference.c 完全兼容
 """
 import torch
@@ -20,8 +22,8 @@ else:
     print("  (安装 CUDA 版 PyTorch 可启用 GPU 加速)")
 
 # ─── 超参数 ──────────────────────────────────────────────────────
-IN_DIM  = 13
-H1, H2  = 48, 32
+IN_DIM  = 16   # 15维 + 新增vel_perp（敌方切向速度，预判射击关键）
+H1, H2, H3  = 64, 48, 32
 
 LR          = 3e-4
 GAMMA       = 0.99
@@ -37,8 +39,9 @@ N_EPOCHS    = 8         # 每批经验的 PPO 更新轮数
 BATCH_SIZE  = 256       # minibatch 大小
 
 TOTAL_STEPS         = 10_000_000   # 总训练步数
-OPP_UPDATE_STEPS    = 100_000      # 每隔 N 步将当前策略加入对手池
-OPP_POOL_MAX        = 20           # 对手池最大容量
+OPP_UPDATE_STEPS    = 50_000       # ↑ 每隔50k步将当前策略加入对手池（原100k，更频繁更新）
+OPP_POOL_MAX        = 30           # ↑ 对手池最大容量（原20，更多样性）
+OPP_LATEST_RATIO    = 0.4          # 选对手时，最新模型被选中的概率下限（确保自博弈强度）
 
 LOG_EVERY   = 10    # 每 N 次更新打印日志
 SAVE_EVERY  = 50    # 每 N 次更新保存模型
@@ -48,10 +51,12 @@ SAVE_PATH   = "E:\\Test_FIre\\best_model_ppo.pkl"
 
 # ════════════════════════════════════════════════════════════════
 # Actor-Critic 网络
-# 骨干: Linear(13→48)→Tanh→Linear(48→32)→Tanh
+# 骨干: Linear(15→64)→Tanh→Linear(64→48)→Tanh→Linear(48→32)→Tanh
 # Actor头: mv_mean, rt_mean(连续), fire_logit(二值)
 # Critic头: value(标量)
-# 导出兼容性: W1/B1/W2/B2/W3/B3 与 nn_inference.c 完全对应
+# 输入16维: dist, angle_diff, dx, dy, hp, hp_enemy, exposure, wall,
+#           sin_r, cos_r, sin_e, cos_e, cd, vel_along, dist_rate, vel_perp
+# 导出兼容性: W1(16×64)/B1/W2/B2/W3/B3/W4(32×3)/B4
 # ════════════════════════════════════════════════════════════════
 class ActorCritic(nn.Module):
     def __init__(self):
@@ -60,18 +65,19 @@ class ActorCritic(nn.Module):
         self.backbone = nn.Sequential(
             nn.Linear(IN_DIM, H1), nn.Tanh(),
             nn.Linear(H1, H2),    nn.Tanh(),
+            nn.Linear(H2, H3),    nn.Tanh(),
         )
         # Actor 头（连续动作）
-        self.mv_head   = nn.Linear(H2, 1)
-        self.rt_head   = nn.Linear(H2, 1)
+        self.mv_head   = nn.Linear(H3, 1)
+        self.rt_head   = nn.Linear(H3, 1)
         # Actor 头（离散开火）
-        self.fire_head = nn.Linear(H2, 1)
+        self.fire_head = nn.Linear(H3, 1)
         # 可学习的动作标准差（log）
         self.log_std   = nn.Parameter(torch.tensor([-0.5, -0.5]))
         # log_std 约束在 [-2, 0]，即 std 在 [0.13, 1.0]
         # 防止策略变得过度随机（std 爆炸问题）
         # Critic 头
-        self.value_head = nn.Linear(H2, 1)
+        self.value_head = nn.Linear(H3, 1)
 
         # 正交初始化（PPO 经典初始化方案）
         for m in self.backbone.modules():
@@ -138,25 +144,27 @@ class ActorCritic(nn.Module):
     def export_weights(self):
         """
         导出兼容 nn_inference.c 格式的权重字典:
-        W1(13×48) B1(48) W2(48×32) B2(32) W3(32×3) B3(3)
-        W3 由三个 Actor 头拼接而成
+        W1(13×64) B1(64) W2(64×48) B2(48) W3(48×32) B3(32) W4(32×3) B4(3)
+        W4 由三个 Actor 头拼接而成
         """
-        W1 = self.backbone[0].weight.detach().cpu().numpy().T    # (13,48)
-        B1 = self.backbone[0].bias.detach().cpu().numpy()        # (48,)
-        W2 = self.backbone[2].weight.detach().cpu().numpy().T    # (48,32)
-        B2 = self.backbone[2].bias.detach().cpu().numpy()        # (32,)
-        # 拼接三个头 → W3(32,3) B3(3)
-        W3 = np.concatenate([
+        W1 = self.backbone[0].weight.detach().cpu().numpy().T    # (16,64)
+        B1 = self.backbone[0].bias.detach().cpu().numpy()        # (64,)
+        W2 = self.backbone[2].weight.detach().cpu().numpy().T    # (64,48)
+        B2 = self.backbone[2].bias.detach().cpu().numpy()        # (48,)
+        W3 = self.backbone[4].weight.detach().cpu().numpy().T    # (48,32)
+        B3 = self.backbone[4].bias.detach().cpu().numpy()        # (32,)
+        # 拼接三个头 → W4(32,3) B4(3)
+        W4 = np.concatenate([
             self.mv_head.weight.detach().cpu().numpy().T,        # (32,1)
             self.rt_head.weight.detach().cpu().numpy().T,        # (32,1)
             self.fire_head.weight.detach().cpu().numpy().T,      # (32,1)
         ], axis=1)                                               # (32,3)
-        B3 = np.array([
+        B4 = np.array([
             self.mv_head.bias.item(),
             self.rt_head.bias.item(),
             self.fire_head.bias.item(),
         ])
-        return [W1, B1, W2, B2, W3, B3]
+        return [W1, B1, W2, B2, W3, B3, W4, B4]
 
 
 # ════════════════════════════════════════════════════════════════
@@ -351,12 +359,26 @@ def train(mode_name="default", max_steps=4000000):
     opponent_pool[-1].eval()
 
     def sample_opponent_fn():
-        """从对手池随机选一个，近期权重更高"""
+        """
+        从对手池随机选一个，近期模型被选概率更高。
+        OPP_LATEST_RATIO 保证最新模型至少有指定概率被选中。
+        同时对手使用带噪声的随机动作（增加多样性）。
+        """
         n = len(opponent_pool)
-        weights = np.linspace(1.0, 3.0, n); weights /= weights.sum()
+        # 基础权重：线性递增
+        weights = np.linspace(1.0, 3.0, n)
+        # 最新模型强制加权到 OPP_LATEST_RATIO
+        weights[-1] = max(weights[-1], OPP_LATEST_RATIO * weights.sum() / (1.0 - OPP_LATEST_RATIO + 1e-8))
+        weights /= weights.sum()
         opp = opponent_pool[np.random.choice(n, p=weights)]
         def fn(obs_np):
-            return opp.act_deterministic(obs_np)
+            # 带少量噪声的确定性动作（增加对手多样性，避免过拟合固定策略）
+            action = opp.act_deterministic(obs_np)
+            noise = np.random.normal(0, 0.05, size=action.shape).astype(np.float32)
+            action = np.clip(action + noise, -1.0, 1.0)
+            # 离散动作不开火概率降低（对手更积极）
+            action[2] = 1.0 if action[2] > 0.3 else 0.0
+            return action
         return fn
 
     # 初始化环境
@@ -371,7 +393,7 @@ def train(mode_name="default", max_steps=4000000):
     n_params = sum(p.numel() for p in policy.parameters())
     print("=" * 65)
     print(f"PPO 超强人机训练 v1.0")
-    print(f"  网络: {IN_DIM}-{H1}-{H2}-3  参数量: {n_params}")
+    print(f"  网络: {IN_DIM}-{H1}-{H2}-{H3}-3  参数量: {n_params}")
     print(f"  N_ENVS={N_ENVS}  N_STEPS={N_STEPS}  总批量={N_ENVS*N_STEPS}/次更新")
     print(f"  模式: {mode_name} | 目标步数: {max_steps:,}")
     print("=" * 65)
