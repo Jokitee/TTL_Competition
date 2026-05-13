@@ -1,6 +1,8 @@
 import numpy as np
 import math
 import random
+from reward_config import RewardConfig
+import analytics
 
 # ============================================================
 # Numba JIT 加速：若安装了 numba 则自动启用（约 10~30x 加速）
@@ -35,7 +37,7 @@ def _step_geometry(p1x, p1y, p1a, p2x, p2y, p2a, player_radius):
     sgap = abs((etm - esc + 180.0) % 360.0 - 180.0)
     blind = sgap > 45.0
 
-    return dist, angle_diff, exposure, blind, dx, dy
+    return dist, angle_diff, exposure, blind, dx, dy, ea
 
 
 class LinkCombatEnv:
@@ -120,7 +122,7 @@ class LinkCombatEnv:
         step_reward = 0.0
 
         # 加速几何计算
-        dist, angle_diff, exposure, blind, dx, dy = _step_geometry(
+        dist, angle_diff, exposure, blind, dx, dy, ea = _step_geometry(
             self.p1[0], self.p1[1], self.p1[2],
             self.p2[0], self.p2[1], self.p2[2],
             self.player_radius)
@@ -134,13 +136,45 @@ class LinkCombatEnv:
         if action1[2] > 0.5 and self.p1[4] <= 0:
             self._fire(self.p1, 1)
             self.p1[4] = self.fire_cooldown
-            if angle_diff <= 5.0:
-                step_reward += 15.0  # 大幅增强完美瞄准开火的奖励
-                if blind: step_reward += 5.0
-            elif angle_diff <= 15.0:
-                step_reward += (15.0-angle_diff)/15.0 * 8.0
+            
+            bounce_threshold = getattr(RewardConfig, "BOUNCE_WALL_THRESHOLD", 60.0)
+            if mw < bounce_threshold:
+                # 靠墙反弹战术：允许背身开火（取正向和背向偏差中较小的一个）
+                aim_err = min(angle_diff, abs(180.0 - angle_diff))
             else:
-                step_reward -= 0.5  # 提高瞎开火惩罚，逼迫它"先瞄准再开打"
+                aim_err = angle_diff
+            
+            # 动态距离判断：强化远距离射击的精准度与稳定性
+            if dist > getattr(RewardConfig, "DISTANCE_THRESHOLD", 200.0):
+                # 远程抽射模式：对瞄准要求极高，奖励更丰厚
+                if aim_err <= 2.0:  
+                    step_reward += RewardConfig.FIRE_PERFECT_AIM * 1.5
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM * 1.5)
+                    if blind: 
+                        step_reward += RewardConfig.FIRE_PERFECT_AIM_BLIND * 1.5
+                        if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM_BLIND * 1.5)
+                elif aim_err <= 5.0:
+                    r = (5.0-aim_err)/5.0 * RewardConfig.FIRE_GOOD_AIM_MAX * 1.5
+                    step_reward += r
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", r)
+                else:
+                    step_reward += RewardConfig.FIRE_BAD_AIM_PENALTY * 2.0
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_BAD_AIM_PENALTY * 2.0)
+            else:
+                # 贴近近战模式：容错率稍高
+                if aim_err <= 5.0:  
+                    step_reward += RewardConfig.FIRE_PERFECT_AIM
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM)
+                    if blind: 
+                        step_reward += RewardConfig.FIRE_PERFECT_AIM_BLIND
+                        if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_PERFECT_AIM_BLIND)
+                elif aim_err <= 12.0:
+                    r = (12.0-aim_err)/12.0 * RewardConfig.FIRE_GOOD_AIM_MAX
+                    step_reward += r
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", r)
+                else:
+                    step_reward += RewardConfig.FIRE_BAD_AIM_PENALTY
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Aiming", RewardConfig.FIRE_BAD_AIM_PENALTY)
 
         if action2[2] > 0.5 and self.p2[4] <= 0:
             self._fire(self.p2, 2)
@@ -165,11 +199,24 @@ class LinkCombatEnv:
                         df  = abs((atb-sc+180)%360-180)
                         if df > self.shield_half_angle:
                             p[3] -= 10
-                            if b[4]==1 and pid==2: step_reward += 200.0
-                            elif b[4]==2 and pid==1: step_reward -= 100.0
+                            if b[4]==1 and pid==2: 
+                                # 命中率提升：根据不同距离给予差异化额外奖励
+                                current_dist = math.hypot(self.p2[0]-self.p1[0], self.p2[1]-self.p1[1])
+                                hit_reward = RewardConfig.HIT_ENEMY
+                                if current_dist > getattr(RewardConfig, "DISTANCE_THRESHOLD", 200.0):
+                                    hit_reward += getattr(RewardConfig, "HIT_RATE_BONUS_LONG_RANGE", 150.0)
+                                else:
+                                    hit_reward += getattr(RewardConfig, "HIT_RATE_BONUS_CLOSE_RANGE", 50.0)
+                                step_reward += hit_reward
+                                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Damage", hit_reward)
+                            elif b[4]==2 and pid==1: 
+                                step_reward += RewardConfig.GOT_HIT_PENALTY # 智能规避：重罚被击中
+                                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Damage", RewardConfig.GOT_HIT_PENALTY)
                         else:
                             # 护盾成功挡下子弹！
-                            if b[4]==2 and pid==1: step_reward += 100.0  # 旋转规避（用护盾接子弹）奖励
+                            if b[4]==2 and pid==1: 
+                                step_reward += RewardConfig.SHIELD_BLOCK  # 智能规避：用护盾接子弹重赏
+                                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Dodging", RewardConfig.SHIELD_BLOCK)
                         hit=True; break
             if not hit: new_bullets.append(b)
         self.bullets = new_bullets
@@ -177,55 +224,127 @@ class LinkCombatEnv:
         done = self.p1[3]<=0 or self.p2[3]<=0 or self.time>=self.game_duration
 
         # ── 每步塑形奖励 ──────────────────────────────────
+        bounce_threshold = getattr(RewardConfig, "BOUNCE_WALL_THRESHOLD", 60.0)
+        if mw < bounce_threshold:
+            # 靠墙反弹战术：允许背身瞄准
+            aim_err = min(angle_diff, abs(180.0 - angle_diff))
+        else:
+            aim_err = angle_diff
+        
         # 积极瞄准策略核心：缩紧瞄准容差，强化"死盯"对手的奖励
-        aim_f  = max(0.0, 1.0 - angle_diff/45.0)  # 将有效瞄准区从 90 度缩小到 45 度
-        prox_f = max(0.0, 1.0 - dist/500.0)
+        aim_f  = max(0.0, 1.0 - aim_err/30.0)  # 攻击准确：有效瞄准区缩小到30度
+        
+        # ==== 动态距离感知与策略切换 ====
+        dist_threshold = getattr(RewardConfig, "DISTANCE_THRESHOLD", 200.0)
+        if dist > dist_threshold:
+            # 远程抽射攻击模式
+            target_optimal_dist = getattr(RewardConfig, "LONG_RANGE_OPTIMAL_DIST", 350.0)
+            dist_maintain_base  = getattr(RewardConfig, "LONG_RANGE_MAINTAIN_BASE", 2.0)
+            too_close_penalty   = getattr(RewardConfig, "LONG_RANGE_TOO_CLOSE_PENALTY", -3.0)
+            closing_in_pen      = getattr(RewardConfig, "LONG_RANGE_CLOSING_IN_PENALTY", -0.1)
+        else:
+            # 贴近近战攻击模式
+            target_optimal_dist = getattr(RewardConfig, "CLOSE_COMBAT_OPTIMAL_DIST", 50.0)
+            dist_maintain_base  = getattr(RewardConfig, "CLOSE_COMBAT_MAINTAIN_BASE", 1.0)
+            too_close_penalty   = getattr(RewardConfig, "CLOSE_COMBAT_TOO_CLOSE_PENALTY", 0.0)
+            closing_in_pen      = getattr(RewardConfig, "CLOSE_COMBAT_CLOSING_IN_REWARD", 0.5)
+
+        dist_err = abs(dist - target_optimal_dist)
+        dist_f = max(0.0, 1.0 - dist_err/200.0) # 距离当前模式的最佳距离越近，dist_f 越大
         sm     = 1.5 if blind else 1.0
 
-        step_reward += aim_f**2 * prox_f * 10.0 * sm  # 权重翻倍，诱导强力追踪进攻
+        r_track = aim_f**2 * dist_f * RewardConfig.TRACK_AIM_WEIGHT * sm  # 诱导在最佳距离上强力追踪进攻
+        step_reward += r_track
+        if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_track)
         
-        # 无视距离的绝对瞄准激励：只要准星对准（误差15度内），就给额外持续奖励
-        if angle_diff < 15.0:
-            step_reward += (15.0 - angle_diff) / 15.0 * 2.5
+        # 无视距离的绝对瞄准激励：只要准星对准（误差10度内），就给额外持续奖励
+        if aim_err < 10.0:
+            r_abs = (10.0 - aim_err) / 10.0 * RewardConfig.TRACK_ABSOLUTE_AIM
+            step_reward += r_abs
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_abs)
 
-        step_reward += prox_f * 0.8                    # 靠近基础
-        if hp_diff > 20:
-            step_reward += prox_f * 1.5                # 优势冲锋
-        elif hp_diff < -20:
-            d_err = abs(dist-200.0)/200.0
-            step_reward += max(0.0, 1.0-d_err) * 0.8  # 劣势保距
+        # 保持距离的基础奖励
+        r_dist_maintain = dist_f * dist_maintain_base
+        step_reward += r_dist_maintain
+        if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_dist_maintain)
+        
+        # 太近惩罚：防止在远程模式下紧贴对手
+        if dist < 150.0 and too_close_penalty < 0:
+            step_reward += too_close_penalty
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", too_close_penalty)
+        
+        # 劣势时更远风筝
+        if hp_diff < -20:
+            d_err_disadv = abs(dist - 400.0) / 200.0
+            r_dis = max(0.0, 1.0 - d_err_disadv) * RewardConfig.DISADVANTAGE_KITE
+            step_reward += r_dis  # 劣势拉得更远
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_dis)
 
+        # 接近/远离对手的惩罚或奖励
         closing = prev_dist - dist
-        step_reward += closing * (0.05 if closing>0 else (0.02 if hp_diff>=0 else 0))
-        if mw < 50: step_reward -= (50.0-mw)/50.0 * 0.6
+        if closing > 0:
+            r_close = closing * closing_in_pen
+            step_reward += r_close
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_close)
+        
+        # ── 墙壁交互与反弹战术奖励/惩罚 ──
+        if mw < bounce_threshold: 
+            # 如果背对对手（角度差>135），视为正在执行墙壁反弹战术，给予奖励
+            if angle_diff > 135.0:
+                r_wall_bounce = ((bounce_threshold - mw) / bounce_threshold) * getattr(RewardConfig, "WALL_BOUNCE_REWARD", 2.0)
+                step_reward += r_wall_bounce
+                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_wall_bounce)
+            else:
+                # 否则给与常规靠墙惩罚
+                r_wall = - ((bounce_threshold - mw) / bounce_threshold) * RewardConfig.WALL_PENALTY
+                step_reward += r_wall
+                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Tracking", r_wall)
 
         # ── 走位规避子弹奖励 ────────────────────────────────
         enemy_bullet_close = False
+        incoming_b = None
         for b in self.bullets:
             if b[4] == 2:  # 敌方子弹
-                if math.hypot(b[0]-self.p1[0], b[1]-self.p1[1]) < 120.0:
+                if math.hypot(b[0]-self.p1[0], b[1]-self.p1[1]) < 150.0:
                     enemy_bullet_close = True
+                    incoming_b = b
                     break
         if enemy_bullet_close:
-            # 当有敌方子弹靠近时，保持移动或旋转就能获得规避奖励
-            if abs(action1[0]) > 0.2 or abs(action1[1]) > 0.2:
-                step_reward += 2.0
+            # 智能规避：面临攻击时保持强力机动
+            if abs(action1[0]) > 0.5 or abs(action1[1]) > 0.5:
+                step_reward += RewardConfig.EVASION_MOVE
+                if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Dodging", RewardConfig.EVASION_MOVE)
+            
+            # 智能规避：将护盾对准袭来的子弹
+            if incoming_b:
+                atb = math.degrees(math.atan2(incoming_b[1]-self.p1[1], incoming_b[0]-self.p1[0])) % 360
+                sc  = (self.p1[2] + 180) % 360
+                df  = abs((atb - sc + 180) % 360 - 180)
+                if df < self.shield_half_angle:
+                    step_reward += RewardConfig.EVASION_SHIELD  # 重奖护盾防御姿态
+                    if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Dodging", RewardConfig.EVASION_SHIELD)
+
+        # 规避奖励机制：对方朝向不指向自己(ea > 30)，同时自己指向对方(angle_diff <= 10)
+        if ea > 30.0 and angle_diff <= 10.0:
+            step_reward += RewardConfig.TACTICAL_FLANK
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.add_reward("Dodging", RewardConfig.TACTICAL_FLANK)
 
         # ── 终局结算 ──────────────────────────────────────
         if done:
+            if analytics.ENABLE_ANALYTICS: analytics.analyzer.save_log()
             if self.p2[3] <= 0:
                 tr = self.time / self.game_duration
-                step_reward += 5000.0 * (1.0+(1.0-tr))
+                step_reward += RewardConfig.WIN_BASE * (1.0+(1.0-tr))
             elif self.p1[3] <= 0:
-                step_reward -= 5000.0
+                step_reward += RewardConfig.LOSE_PENALTY
             elif self.time >= self.game_duration:
                 hdf = self.p1[3]-self.p2[3]
                 if hdf > 0:
-                    step_reward += 500.0 + hdf*10     # 优势超时，只给小奖励（鼓励早点击杀）
+                    step_reward += RewardConfig.TIME_OUT_WIN_BASE + hdf*RewardConfig.TIME_OUT_WIN_PER_HP     # 优势超时，只给小奖励（鼓励早点击杀）
                 elif hdf < 0:
-                    step_reward -= 5000.0             # 劣势超时，视为失败
+                    step_reward += RewardConfig.TIME_OUT_LOSE             # 劣势超时，视为失败
                 else:
-                    step_reward -= 5000.0             # 完全平局，惩罚懈怠行为！
+                    step_reward += RewardConfig.TIME_OUT_DRAW             # 完全平局，惩罚懈怠行为！
 
         return self._get_obs(), step_reward, done
 

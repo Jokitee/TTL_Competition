@@ -22,7 +22,7 @@ from game_env import LinkCombatEnv
 # 键盘控制 (人工模式 P2):  W/S=前后  A/D=旋转  F/Enter=开火
 
 # ─── 路径 ────────────────────────────────────────────────────────
-PPO_PATH = "E:\\Test_FIre\\best_model_ppo.pkl"
+PPO_PATH = "E:\\Test_FIre\\best_model_ppo_dynamic_attacker.pkl"
 GA_PATH  = "E:\\Test_FIre\\best_model.pkl"
 
 # ─── 显示设置 ────────────────────────────────────────────────────
@@ -68,6 +68,7 @@ def load_ppo_model(path):
         model.backbone[0].bias.copy_(  torch.FloatTensor(B1))
         model.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
         model.backbone[2].bias.copy_(  torch.FloatTensor(B2))
+        
         model.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
         model.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
         model.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
@@ -81,16 +82,28 @@ def load_ppo_model(path):
 
 def load_ga_model(path):
     """加载 GA 模型并返回推理函数"""
-    IN=13; H1=48; H2=32
     with open(path, 'rb') as f:
-        W1,B1,W2,B2,W3,B3 = pickle.load(f)
-    def act(obs_np):
-        h1 = np.tanh(obs_np @ W1 + B1)
-        h2 = np.tanh(h1 @ W2 + B2)
-        out = h2 @ W3 + B3
-        return np.array([np.tanh(out[0]), np.tanh(out[1]),
-                         1.0 if out[2]>0 else 0.0], dtype=np.float32)
-    return act
+        weights = pickle.load(f)
+    
+    if len(weights) == 6:
+        W1, B1, W2, B2, W3, B3 = weights
+        def act(obs_np):
+            h1 = np.tanh(obs_np @ W1 + B1)
+            h2 = np.tanh(h1 @ W2 + B2)
+            out = h2 @ W3 + B3
+            return np.array([np.tanh(out[0]), np.tanh(out[1]),
+                             1.0 if out[2]>0 else 0.0], dtype=np.float32)
+        return act
+    else:
+        W1, B1, W2, B2, W3, B3, W4, B4 = weights
+        def act(obs_np):
+            h1 = np.tanh(obs_np @ W1 + B1)
+            h2 = np.tanh(h1 @ W2 + B2)
+            h3 = np.tanh(h2 @ W3 + B3)
+            out = h3 @ W4 + B4
+            return np.array([np.tanh(out[0]), np.tanh(out[1]),
+                             1.0 if out[2]>0 else 0.0], dtype=np.float32)
+        return act
 
 def random_agent(obs):
     return np.array([np.random.uniform(-1,1), np.random.uniform(-1,1),

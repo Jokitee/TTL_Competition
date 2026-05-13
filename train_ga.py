@@ -2,39 +2,38 @@ import numpy as np
 from game_env import LinkCombatEnv
 import pickle
 import concurrent.futures
+import analytics
+from train_config import NetConfig, GATrainConfig
 
-# 各阶段配置（按课程难度动态调整，平衡速度与质量）
-# Phase1: 假人不动，15s游戏足够；Phase3: 全时长30s确保策略正确性
-PHASE_CFG = {
-    1: dict(episodes=3, max_steps=900),   # 假人：3局×15s，速度最快
-    2: dict(episodes=5, max_steps=1200),  # 随机：5局×20s
-    3: dict(episodes=4, max_steps=1800),  # HoF：4局×30s，全时长
-}
+# ========== 拟合度分析开关 ==========
+# 开启后，会在每次游戏结束时记录得分，并在训练结束时绘制"瞄准/躲避/追踪"等各项参数的拟合度分布图
+analytics.ENABLE_ANALYTICS = True
 
 # ============================================================
-# 架构：13-48-32-3
-# 参数：2339  Flash：9.1KB  (STM32F103C8T6 64KB完全适配)
+# 架构：使用 NetConfig 中定义的结构
 # ============================================================
-IN=13; H1=48; H2=32; OUT=3
+IN = NetConfig.IN; H1 = NetConfig.H1; H2 = NetConfig.H2; H3 = NetConfig.H3; OUT = NetConfig.OUT
 
 class SimpleBrain:
     def __init__(self, weights=None):
         if weights is None:
             self.w1 = np.random.randn(IN,H1)*0.5;  self.b1 = np.zeros(H1)
             self.w2 = np.random.randn(H1,H2)*0.5;  self.b2 = np.zeros(H2)
-            self.w3 = np.random.randn(H2,OUT)*0.5; self.b3 = np.zeros(OUT)
+            self.w3 = np.random.randn(H2,H3)*0.5;  self.b3 = np.zeros(H3)
+            self.w4 = np.random.randn(H3,OUT)*0.5; self.b4 = np.zeros(OUT)
         else:
-            self.w1,self.b1,self.w2,self.b2,self.w3,self.b3 = weights
+            self.w1,self.b1,self.w2,self.b2,self.w3,self.b3,self.w4,self.b4 = weights
 
     def forward(self, obs):
         h1  = np.tanh(obs @ self.w1 + self.b1)
         h2  = np.tanh(h1  @ self.w2 + self.b2)
-        out = h2 @ self.w3 + self.b3
+        h3  = np.tanh(h2  @ self.w3 + self.b3)
+        out = h3 @ self.w4 + self.b4
         return np.array([np.tanh(out[0]), np.tanh(out[1]),
                          1.0 if out[2]>0 else 0.0], dtype=np.float32)
 
     def get_weights(self):
-        return [self.w1,self.b1,self.w2,self.b2,self.w3,self.b3]
+        return [self.w1,self.b1,self.w2,self.b2,self.w3,self.b3,self.w4,self.b4]
 
 
 # ============================================================
@@ -65,7 +64,7 @@ def evaluate_worker(args):
     phase: 用于查 PHASE_CFG，决定 episodes 和 max_steps
     """
     brain, opponents, phase = args
-    cfg = PHASE_CFG.get(phase, PHASE_CFG[3])
+    cfg = GATrainConfig.PHASE_CFG.get(phase, GATrainConfig.PHASE_CFG[3])
     ep  = cfg['episodes']; ms = cfg['max_steps']
     if isinstance(opponents, list):
         scores = [evaluate(brain, opp, episodes=ep, max_steps=ms, add_noise=True)
@@ -97,23 +96,22 @@ def tournament(pop, scores, k=5):
 # 主训练循环 — 超强人机版
 # ============================================================
 def train():
-    pop_size    = 100          # 更大种群 → 更丰富基因多样性
-    elite_size  = 10
-    generations = 200
-    mut_rate    = 0.15
+    pop_size    = GATrainConfig.POP_SIZE
+    elite_size  = GATrainConfig.ELITE_SIZE
+    generations = GATrainConfig.GENERATIONS
+    mut_rate    = GATrainConfig.MUT_RATE_INIT
 
     # 课程阶段
-    PHASE2 = 30    # 0~29:  静止假人（学追踪瞄准）
-    PHASE3 = 60    # 30~59: 随机池（学追击移动目标）
-                   # 60+:   Hall of Fame 自博弈（学全面对抗）
+    PHASE2 = GATrainConfig.PHASE2_START_GEN
+    PHASE3 = GATrainConfig.PHASE3_START_GEN
 
     # HoF 设置
     hall_of_fame  = []
-    HOF_MAX       = 30
-    HOF_INTERVAL  = 4     # 每4代存一次（更高频，HoF更新更快）
+    HOF_MAX       = GATrainConfig.HOF_MAX
+    HOF_INTERVAL  = GATrainConfig.HOF_INTERVAL
 
-    # Phase2 对手池（多个随机个体，防止对单一对手过拟合）
-    POOL2_SIZE    = 8
+    # Phase2 对手池
+    POOL2_SIZE    = GATrainConfig.POOL2_SIZE
 
     # 初始种群
     population = [SimpleBrain() for _ in range(pop_size)]
@@ -121,16 +119,17 @@ def train():
     # 静止假人
     dummy_w = [np.zeros((IN,H1)), np.zeros(H1),
                np.zeros((H1,H2)), np.zeros(H2),
-               np.zeros((H2,OUT)),np.zeros(OUT)]
+               np.zeros((H2,H3)), np.zeros(H3),
+               np.zeros((H3,OUT)),np.zeros(OUT)]
     dummy   = SimpleBrain(weights=dummy_w)
     pool2   = [dummy]     # 初始Pool2 = 假人
 
     best_ever = -float('inf')
     no_imp    = 0
-    total_p   = IN*H1+H1 + H1*H2+H2 + H2*OUT+OUT
+    total_p   = IN*H1+H1 + H1*H2+H2 + H2*H3+H3 + H3*OUT+OUT
 
     print("="*65)
-    print(f"超强人机训练 v7.0: {IN}-{H1}-{H2}-{OUT}  "
+    print(f"超强人机训练 v7.0: {IN}-{H1}-{H2}-{H3}-{OUT}  "
           f"({total_p}params, {total_p*4}B Flash)")
     print(f"  Pop={pop_size}  Elite={elite_size}  Gens={generations}")
     print(f"  随机初始位置 | 护盾感知 | 三阶课程 | HoF自博弈")
@@ -234,6 +233,9 @@ def train():
 
     print(f"\n训练完成！历史最高: {best_ever:.1f}")
     print("模型已保存至 E:\\Test_FIre\\best_model.pkl")
+    
+    if analytics.ENABLE_ANALYTICS:
+        analytics.RewardAnalyzer.plot_distribution()
 
 if __name__ == "__main__":
     train()

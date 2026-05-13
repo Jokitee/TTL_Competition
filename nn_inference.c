@@ -7,8 +7,8 @@
 #endif
 
 // ============================================================
-// 神经网络推理：13输入 -> 48隐藏1 -> 32隐藏2 -> 3输出
-// 参数量: 2339，Flash占用约 9.4KB，适配 STM32F103C8T6 (64KB Flash)
+// 神经网络推理：13输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 3输出
+// 参数量: 4611，Flash占用约 18.4KB，适配 STM32F103C8T6 (64KB Flash)
 //
 // 观测输入（13维，与 Python get_relative_obs 严格一致）:
 //  obs[0]  dist         相对距离        (0~1)
@@ -26,26 +26,33 @@
 //  obs[12] self_cd      自身冷却状态    (0=可开火, 1=刚射击)
 // ============================================================
 void nn_inference(const float obs[13], float actions[3]) {
-    float h1[48], h2[32];
+    float h1[64], h2[48], h3[32];
 
-    // 1. 输入层 → 隐藏层1 (13 → 48)
-    for (int j = 0; j < 48; j++) {
+    // 1. 输入层 → 隐藏层1 (13 → 64)
+    for (int j = 0; j < 64; j++) {
         h1[j] = B1[j];
         for (int i = 0; i < 13; i++) h1[j] += obs[i] * W1[i][j];
         h1[j] = tanhf(h1[j]);
     }
 
-    // 2. 隐藏层1 → 隐藏层2 (48 → 32)
-    for (int j = 0; j < 32; j++) {
+    // 2. 隐藏层1 → 隐藏层2 (64 → 48)
+    for (int j = 0; j < 48; j++) {
         h2[j] = B2[j];
-        for (int i = 0; i < 48; i++) h2[j] += h1[i] * W2[i][j];
+        for (int i = 0; i < 64; i++) h2[j] += h1[i] * W2[i][j];
         h2[j] = tanhf(h2[j]);
     }
 
-    // 3. 隐藏层2 → 输出层 (32 → 3)
+    // 3. 隐藏层2 → 隐藏层3 (48 → 32)
+    for (int j = 0; j < 32; j++) {
+        h3[j] = B3[j];
+        for (int i = 0; i < 48; i++) h3[j] += h2[i] * W3[i][j];
+        h3[j] = tanhf(h3[j]);
+    }
+
+    // 4. 隐藏层3 → 输出层 (32 → 3)
     for (int j = 0; j < 3; j++) {
-        actions[j] = B3[j];
-        for (int i = 0; i < 32; i++) actions[j] += h2[i] * W3[i][j];
+        actions[j] = B4[j];
+        for (int i = 0; i < 32; i++) actions[j] += h3[i] * W4[i][j];
     }
 
     actions[0] = tanhf(actions[0]);  // mv: 移动量  [-1, 1]

@@ -22,7 +22,7 @@ else:
     raise FileNotFoundError("未找到模型文件，请先完成训练。")
 
 with open(MODEL_PATH, "rb") as f:
-    W1, B1, W2, B2, W3, B3 = pickle.load(f)
+    W1, B1, W2, B2, W3, B3, W4, B4 = pickle.load(f)
 
 def to_c_array(name, arr):
     flat = arr.flatten()
@@ -32,8 +32,8 @@ def to_c_array(name, arr):
         return f"const float {name}[{s[0]}] = {{{vals}}};\n"
     return f"const float {name}[{s[0]}][{s[1]}] = {{{vals}}};\n"
 
-arch = f"{W1.shape[0]}-{W1.shape[1]}-{W2.shape[1]}-{W3.shape[1]}"
-total = sum(x.size for x in [W1,B1,W2,B2,W3,B3])
+arch = f"{W1.shape[0]}-{W1.shape[1]}-{W2.shape[1]}-{W3.shape[1]}-{W4.shape[1]}"
+total = sum(x.size for x in [W1,B1,W2,B2,W3,B3,W4,B4])
 
 with open(OUT_PATH, "w") as f:
     f.write("#pragma once\n\n")
@@ -46,6 +46,8 @@ with open(OUT_PATH, "w") as f:
     f.write(to_c_array("B2", B2))
     f.write(to_c_array("W3", W3))
     f.write(to_c_array("B3", B3))
+    f.write(to_c_array("W4", W4))
+    f.write(to_c_array("B4", B4))
 
 print(f"[{src}] 导出成功: {arch} -> {OUT_PATH}")
 print(f"  参数量: {total}   Flash: {total*4}B = {total*4/1024:.1f}KB")

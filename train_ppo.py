@@ -336,12 +336,12 @@ def collect_rollouts(policy, envs, obs_list, opponent_fn):
 # ════════════════════════════════════════════════════════════════
 # 主训练循环
 # ════════════════════════════════════════════════════════════════
-def train():
+def train(mode_name="default", max_steps=4000000):
     policy    = ActorCritic().to(device)
     optimizer = optim.Adam(policy.parameters(), lr=LR, eps=1e-5)
 
     # 线性学习率衰减
-    total_updates = TOTAL_STEPS // (N_ENVS * N_STEPS)
+    total_updates = max_steps // (N_ENVS * N_STEPS)
     scheduler = optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1.0, end_factor=0.1,
         total_iters=total_updates)
@@ -373,12 +373,12 @@ def train():
     print(f"PPO 超强人机训练 v1.0")
     print(f"  网络: {IN_DIM}-{H1}-{H2}-3  参数量: {n_params}")
     print(f"  N_ENVS={N_ENVS}  N_STEPS={N_STEPS}  总批量={N_ENVS*N_STEPS}/次更新")
-    print(f"  目标步数: {TOTAL_STEPS:,}")
+    print(f"  模式: {mode_name} | 目标步数: {max_steps:,}")
     print("=" * 65)
 
     opp_fn = sample_opponent_fn()
 
-    while total_steps < TOTAL_STEPS:
+    while total_steps < max_steps:
         policy.train()
         batch, obs_list, ep_rew = collect_rollouts(policy, envs, obs_list, opp_fn)
         policy.train()
@@ -416,17 +416,30 @@ def train():
             if ep_rew > best_reward:
                 best_reward = ep_rew
             weights = policy.export_weights()
-            with open(SAVE_PATH, 'wb') as f:
+            save_path = f"E:\\Test_FIre\\best_model_ppo_{mode_name}.pkl"
+            with open(save_path, 'wb') as f:
                 pickle.dump(weights, f)
 
     # 最终保存
     weights = policy.export_weights()
-    with open(SAVE_PATH, 'wb') as f:
+    save_path = f"E:\\Test_FIre\\best_model_ppo_{mode_name}.pkl"
+    with open(save_path, 'wb') as f:
         pickle.dump(weights, f)
-    print(f"\n训练完成！最佳奖励: {best_reward:.1f}")
-    print(f"权重已保存至 {SAVE_PATH}")
-    print("运行 export_to_c.py 生成 model_weights.h（替换 SAVE_PATH 为 PPO 路径）")
+    print(f"\n[{mode_name}] 训练完成！最佳奖励: {best_reward:.1f}")
+    print(f"权重已保存至 {save_path}")
+    print(f"运行 export_to_c.py 生成 model_weights.h（替换 SAVE_PATH 为 {save_path}）")
 
 
 if __name__ == "__main__":
-    train()
+    from reward_config import RewardConfig
+    
+    print(f"\n\n{'='*20} 开始训练: 动态距离感知攻击专用模型 {'='*20}")
+    
+    # 动态修改奖励配置(如果需要，确保BOUNCE_EXPLOIT关闭)
+    setattr(RewardConfig, "BOUNCE_EXPLOIT", False)
+    
+    # 重置全局奖励归一化
+    reward_stats = RunningStats()
+    
+    # 将模型精简为单一的动态攻击专用模型
+    train(mode_name="dynamic_attacker", max_steps=10_000_000)
