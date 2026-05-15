@@ -58,51 +58,29 @@ def main():
     font_s = pygame.font.Font(None, 17)
 
     # 模型加载或初始化
-    MODEL_PATH = "E:\\Test_FIre\\best_model_ppo_dynamic_attacker.pkl"
+    MODEL_PATH = "E:\\Test_FIre\\best_model_v5_branched.pkl"
     policy = ActorCritic().to(device)
     if os.path.exists(MODEL_PATH):
         print("加载现有模型进行实时对抗训练...")
         with open(MODEL_PATH, 'rb') as f:
             weights = pickle.load(f)
         with torch.no_grad():
-            if len(weights) == 6:
-                W1,B1,W2,B2,W3,B3 = weights
-                policy.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
-                policy.backbone[0].bias.copy_(  torch.FloatTensor(B1))
-                policy.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
-                policy.backbone[2].bias.copy_(  torch.FloatTensor(B2))
-                policy.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
-                policy.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
-                policy.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
-                policy.rt_head.bias.copy_(      torch.FloatTensor([B3[1]]))
-                policy.fire_head.weight.copy_(  torch.FloatTensor(W3[:,2:3].T))
-                policy.fire_head.bias.copy_(    torch.FloatTensor([B3[2]]))
-            else:
-                W1,B1,W2,B2,W3,B3,W4,B4 = weights
-                policy.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
-                policy.backbone[0].bias.copy_(  torch.FloatTensor(B1))
-                policy.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
-                policy.backbone[2].bias.copy_(  torch.FloatTensor(B2))
-                policy.backbone[4].weight.copy_(torch.FloatTensor(W3.T))
-                policy.backbone[4].bias.copy_(  torch.FloatTensor(B3))
+            if len(weights) == 12:
+                policy.shared[0].weight.copy_(torch.FloatTensor(weights[0].T))
+                policy.shared[0].bias.copy_(torch.FloatTensor(weights[1]))
+                policy.offense_branch[0].weight.copy_(torch.FloatTensor(weights[2].T))
+                policy.offense_branch[0].bias.copy_(torch.FloatTensor(weights[3]))
+                policy.tactical_branch[0].weight.copy_(torch.FloatTensor(weights[4].T))
+                policy.tactical_branch[0].bias.copy_(torch.FloatTensor(weights[5]))
                 
-                # 自动检测 W4 格式：v3.0 离散(32,7) vs 旧版连续(32,3)
-                if W4.shape[1] == 7:
-                    # v3.0 离散动作版：mv(3) + rt(3) + fire(1)
-                    policy.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:3].T))
-                    policy.mv_head.bias.copy_(      torch.FloatTensor(B4[0:3]))
-                    policy.rt_head.weight.copy_(    torch.FloatTensor(W4[:,3:6].T))
-                    policy.rt_head.bias.copy_(      torch.FloatTensor(B4[3:6]))
-                    policy.fire_head.weight.copy_(  torch.FloatTensor(W4[:,6:7].T))
-                    policy.fire_head.bias.copy_(    torch.FloatTensor(B4[6:7]))
-                else:
-                    # 旧版连续动作：mv(1) + rt(1) + fire(1) = (32,3)
-                    policy.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:1].T))
-                    policy.mv_head.bias.copy_(      torch.FloatTensor([B4[0]]))
-                    policy.rt_head.weight.copy_(    torch.FloatTensor(W4[:,1:2].T))
-                    policy.rt_head.bias.copy_(      torch.FloatTensor([B4[1]]))
-                    policy.fire_head.weight.copy_(  torch.FloatTensor(W4[:,2:3].T))
-                    policy.fire_head.bias.copy_(    torch.FloatTensor([B4[2]]))
+                policy.mv_head.weight.copy_(torch.FloatTensor(weights[6].T))
+                policy.mv_head.bias.copy_(torch.FloatTensor(weights[7]))
+                policy.rt_head.weight.copy_(torch.FloatTensor(weights[8].T))
+                policy.rt_head.bias.copy_(torch.FloatTensor(weights[9]))
+                policy.fire_head.weight.copy_(torch.FloatTensor(weights[10].T))
+                policy.fire_head.bias.copy_(torch.FloatTensor(weights[11]))
+            else:
+                print("模型格式不匹配！请先使用 train_ppo.py 训练一次。")
     else:
         print("未找到现有模型，从头开始训练...")
 
@@ -127,7 +105,8 @@ def main():
     update_count = 0
 
     env = LinkCombatEnv()
-    obs = env.reset(fixed_start=False)
+    env.set_mode(gallery=False, fixed=False)  # 实战模式，双方均可自由移动
+    obs = env.reset(stage=3)
     
     stats = dict(p1_hp=100, p2_hp=100, step=0, wins=0, losses=0, updates=0, last_loss=0.0)
 
@@ -148,13 +127,13 @@ def main():
         with torch.no_grad():
             mv, rt, fire, mv_idx, rt_idx, logp, value = policy.act(obs_tensor)
         
-        mv_np      = mv.cpu().numpy()[0]
-        rt_np      = rt.cpu().numpy()[0]
-        fire_np    = fire.cpu().numpy()[0]
-        mv_idx_np  = mv_idx.cpu().numpy()[0]
-        rt_idx_np  = rt_idx.cpu().numpy()[0]
-        logp_np    = logp.cpu().numpy()[0]
-        val_np     = value.cpu().numpy()[0]
+        mv_np      = mv.cpu().item()
+        rt_np      = rt.cpu().item()
+        fire_np    = fire.cpu().item()
+        mv_idx_np  = mv_idx.cpu().item()
+        rt_idx_np  = rt_idx.cpu().item()
+        logp_np    = logp.cpu().item()
+        val_np     = value.cpu().item()
         
         action1 = np.array([mv_np, rt_np, fire_np], dtype=np.float32)
         action2 = human_action(keys)
@@ -181,7 +160,7 @@ def main():
         if done:
             if env.p2[3] <= 0: stats['wins'] += 1
             elif env.p1[3] <= 0: stats['losses'] += 1
-            obs = env.reset(fixed_start=False)
+            obs = env.reset(stage=3)
 
         # 触发 PPO 实时更新
         if step_idx >= N_STEPS:

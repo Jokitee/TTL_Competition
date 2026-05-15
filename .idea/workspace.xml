@@ -4,7 +4,26 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="b0bcbb39-8ce7-47d7-811e-456594111af3" name="更改" comment="" />
+    <list default="true" id="b0bcbb39-8ce7-47d7-811e-456594111af3" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/analytics.py" beforeDir="false" afterPath="$PROJECT_DIR$/analytics.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/best_model_ppo_dynamic_attacker.pkl" beforeDir="false" afterPath="$PROJECT_DIR$/best_model_ppo_dynamic_attacker.pkl" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/combat_logic.c" beforeDir="false" afterPath="$PROJECT_DIR$/combat_logic.c" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/export_to_c.py" beforeDir="false" afterPath="$PROJECT_DIR$/export_to_c.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/game_env.py" beforeDir="false" afterPath="$PROJECT_DIR$/game_env.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/human_vs_ai.py" beforeDir="false" afterPath="$PROJECT_DIR$/human_vs_ai.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/human_vs_ai_train.py" beforeDir="false" afterPath="$PROJECT_DIR$/human_vs_ai_train.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/nn_inference.c" beforeDir="false" afterPath="$PROJECT_DIR$/nn_inference.c" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/nn_inference.h" beforeDir="false" afterPath="$PROJECT_DIR$/nn_inference.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/realtime_plot.py" beforeDir="false" afterPath="$PROJECT_DIR$/realtime_plot.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/reward_config.py" beforeDir="false" afterPath="$PROJECT_DIR$/reward_config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/reward_distribution.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/reward_logs.jsonl" beforeDir="false" afterPath="$PROJECT_DIR$/reward_logs.jsonl" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/train_config.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/train_ppo.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_ppo.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uart_ai_handler.c" beforeDir="false" afterPath="$PROJECT_DIR$/uart_ai_handler.c" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />

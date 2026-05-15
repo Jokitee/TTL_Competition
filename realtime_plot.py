@@ -1,75 +1,74 @@
 import matplotlib.pyplot as plt
 import json
-import os
 import time
-import numpy as np
-from matplotlib.animation import FuncAnimation
+import os
+from collections import deque
 
-# ============================================================
-# 实时监控配置
-# ============================================================
-LOG_FILE = "E:\\Test_FIre\\reward_logs.jsonl"
-REFRESH_MS = 2000  # 每2秒刷新一次
-SMOOTH_WEIGHT = 0.9  # 平滑权重
+# 配置
+LOG_PATH = "reward_logs.jsonl"
+MAX_POINTS = 500  # 图表最多显示的采样点数
 
-def smooth(data, weight=0.9):
-    if not data: return []
-    smoothed = []
-    last = data[0]
-    for val in data:
-        last = last * weight + val * (1 - weight)
-        smoothed.append(last)
-    return smoothed
+def load_data_fast():
+    """优化后的数据读取：只采集最后一部分数据，防止文件过大卡顿"""
+    x, y_total = [], []
+    y_close, y_mid, y_long = [], [], []
+    
+    if not os.path.exists(LOG_PATH):
+        return x, y_total, y_close, y_mid, y_long
 
-def animate(i):
-    if not os.path.exists(LOG_FILE):
-        return
-
-    history = []
     try:
-        with open(LOG_FILE, "r") as f:
-            for line in f:
-                if line.strip():
-                    history.append(json.loads(line.strip()))
-    except Exception:
-        return
+        with open(LOG_PATH, "r") as f:
+            # 仅读取最后 2000 行，避免全量解析
+            lines = f.readlines()
+            if len(lines) > 2000:
+                lines = lines[-2000:]
+            
+            # 采样显示，保持图表流畅
+            step = max(1, len(lines) // MAX_POINTS)
+            for i, line in enumerate(lines[::step]):
+                data = json.loads(line)
+                x.append(i)
+                y_total.append(data.get("total_reward", 0))
+                y_close.append(data.get("hr_close", 0) * 100)
+                y_mid.append(data.get("hr_mid", 0) * 100)
+                y_long.append(data.get("hr_long", 0) * 100)
+    except Exception as e:
+        print(f"Read error: {e}")
+    
+    return x, y_total, y_close, y_mid, y_long
 
-    if not history:
-        return
+def on_key(event):
+    if event.key == 'c':
+        print("Cleaning logs...")
+        if os.path.exists(LOG_PATH):
+            with open(LOG_PATH, "w") as f: f.write("")
+        plt.clf()
 
-    categories = ["Aiming", "Dodging", "Tracking", "Damage"]
-    colors = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99']
-    episodes = list(range(1, len(history) + 1))
+def main():
+    plt.ion()
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    fig.canvas.mpl_connect('key_press_event', on_key)
 
-    for idx, cat in enumerate(categories):
-        y_raw = []
-        for ep in history:
-            total_abs = sum(abs(ep[c]) for c in categories) + 1e-6
-            pct = (abs(ep[cat]) / total_abs) * 100.0
-            y_raw.append(pct)
+    while True:
+        x, y_total, y_close, y_mid, y_long = load_data_fast()
         
-        y_smoothed = smooth(y_raw, SMOOTH_WEIGHT)
-        
-        axs[idx].clear()
-        axs[idx].plot(episodes, y_raw, color=colors[idx], alpha=0.2)
-        axs[idx].plot(episodes, y_smoothed, color=colors[idx], linewidth=2, label=f"{cat} Smoothed")
-        axs[idx].set_title(f"{cat} 能力占比 (%)")
-        axs[idx].set_ylim(0, 100)
-        axs[idx].set_ylabel("%")
-        axs[idx].grid(True, linestyle='--', alpha=0.5)
-        axs[idx].legend(loc='upper right')
+        if x:
+            ax1.clear()
+            ax1.plot(x, y_total, label="Total Reward", color='blue', linewidth=1)
+            ax1.set_title("Training Progress (Fast Mode - Press 'C' to clear)")
+            ax1.legend(loc='upper left')
 
-    axs[3].set_xlabel("对局数 (Episodes)")
-    plt.tight_layout()
+            ax2.clear()
+            ax2.plot(x, y_close, label="Close Range", color='green', alpha=0.8)
+            ax2.plot(x, y_mid, label="Mid Range", color='orange', alpha=0.8)
+            ax2.plot(x, y_long, label="Long Range", color='red', alpha=0.8)
+            ax2.set_ylabel("Accuracy (%)")
+            ax2.set_ylim(-5, 105)
+            ax2.legend(loc='upper left')
+            ax2.grid(True, linestyle='--', alpha=0.5)
 
-# 初始化画布
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial']
-plt.rcParams['axes.unicode_minus'] = False
-fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
-fig.suptitle('AI 训练能力拟合实时监控 (Real-time Fitness Monitor)', fontsize=16)
+        plt.pause(1) # 降低刷新频率到 1s
+        time.sleep(0.5)
 
-ani = FuncAnimation(fig, animate, interval=REFRESH_MS)
-
-print(f"正在实时监控: {LOG_FILE}")
-print("提示: 请保持训练脚本开启并设置 analytics.ENABLE_ANALYTICS = True")
-plt.show()
+if __name__ == "__main__":
+    main()

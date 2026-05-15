@@ -22,7 +22,7 @@ from game_env import LinkCombatEnv
 # 键盘控制 (人工模式 P2):  W/S=前后  A/D=旋转  F/Enter=开火
 
 # ─── 路径 ────────────────────────────────────────────────────────
-PPO_PATH = "E:\\Test_FIre\\best_model_ppo_dynamic_attacker.pkl"
+PPO_PATH = "E:\\Test_FIre\\best_model_v5_branched.pkl"
 GA_PATH  = "E:\\Test_FIre\\best_model.pkl"
 
 # ─── 显示设置 ────────────────────────────────────────────────────
@@ -56,42 +56,33 @@ GRAY        = (100, 110, 130)
 # 加载模型
 # ════════════════════════════════════════════════════════════════
 def load_ppo_model(path):
-    """加载 PPO 模型并返回推理函数"""
+    """加载 PPO 模型并返回推理函数 (兼容 v5 分支架构)"""
     from train_ppo import ActorCritic
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = ActorCritic().to(device)
     with open(path, 'rb') as f:
-        weights = pickle.load(f)
+        w = pickle.load(f)
     
-    # 反向还原权重
+    # 权重还原逻辑
     with torch.no_grad():
-        if len(weights) == 6:
-            W1,B1,W2,B2,W3,B3 = weights
-            model.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
-            model.backbone[0].bias.copy_(  torch.FloatTensor(B1))
-            model.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
-            model.backbone[2].bias.copy_(  torch.FloatTensor(B2))
-            model.mv_head.weight.copy_(    torch.FloatTensor(W3[:,0:1].T))
-            model.mv_head.bias.copy_(      torch.FloatTensor([B3[0]]))
-            model.rt_head.weight.copy_(    torch.FloatTensor(W3[:,1:2].T))
-            model.rt_head.bias.copy_(      torch.FloatTensor([B3[1]]))
-            model.fire_head.weight.copy_(  torch.FloatTensor(W3[:,2:3].T))
-            model.fire_head.bias.copy_(    torch.FloatTensor([B3[2]]))
-        else:
-            W1,B1,W2,B2,W3,B3,W4,B4 = weights
-            model.backbone[0].weight.copy_(torch.FloatTensor(W1.T))
-            model.backbone[0].bias.copy_(  torch.FloatTensor(B1))
-            model.backbone[2].weight.copy_(torch.FloatTensor(W2.T))
-            model.backbone[2].bias.copy_(  torch.FloatTensor(B2))
-            model.backbone[4].weight.copy_(torch.FloatTensor(W3.T))
-            model.backbone[4].bias.copy_(  torch.FloatTensor(B3))
+        if len(w) == 12:
+            # v5 Branched Architecture
+            model.shared[0].weight.copy_(torch.FloatTensor(w[0].T))
+            model.shared[0].bias.copy_(torch.FloatTensor(w[1]))
+            model.offense_branch[0].weight.copy_(torch.FloatTensor(w[2].T))
+            model.offense_branch[0].bias.copy_(torch.FloatTensor(w[3]))
+            model.tactical_branch[0].weight.copy_(torch.FloatTensor(w[4].T))
+            model.tactical_branch[0].bias.copy_(torch.FloatTensor(w[5]))
             
-            model.mv_head.weight.copy_(    torch.FloatTensor(W4[:,0:1].T))
-            model.mv_head.bias.copy_(      torch.FloatTensor([B4[0]]))
-            model.rt_head.weight.copy_(    torch.FloatTensor(W4[:,1:2].T))
-            model.rt_head.bias.copy_(      torch.FloatTensor([B4[1]]))
-            model.fire_head.weight.copy_(  torch.FloatTensor(W4[:,2:3].T))
-            model.fire_head.bias.copy_(    torch.FloatTensor([B4[2]]))
+            model.mv_head.weight.copy_(torch.FloatTensor(w[6].T))
+            model.mv_head.bias.copy_(torch.FloatTensor(w[7]))
+            model.rt_head.weight.copy_(torch.FloatTensor(w[8].T))
+            model.rt_head.bias.copy_(torch.FloatTensor(w[9]))
+            model.fire_head.weight.copy_(torch.FloatTensor(w[10].T))
+            model.fire_head.bias.copy_(torch.FloatTensor(w[11]))
+        else:
+            print("[Warning] Model weight length mismatch! Expected 12 for v5 Branched.")
+    
     model.eval()
     def act(obs_np):
         return model.act_deterministic(obs_np)
@@ -125,6 +116,15 @@ def load_ga_model(path):
 def random_agent(obs):
     return np.array([np.random.uniform(-1,1), np.random.uniform(-1,1),
                      float(np.random.rand()>0.8)], dtype=np.float32)
+
+def smart_random_agent(obs):
+    """更聪明的随机代理：会转向目标方向，但动作随机"""
+    # obs[1] = angle_diff / 180.0  有符号，负数=目标在左，正数=目标在右
+    angle_diff = obs[1]  # 已归一化
+    rt = -1.0 if angle_diff < -0.05 else (1.0 if angle_diff > 0.05 else 0.0)
+    mv = float(np.random.choice([-1.0, 0.0, 1.0], p=[0.2, 0.3, 0.5]))
+    fire = 1.0 if abs(angle_diff) < 0.1 else float(np.random.rand() > 0.95)
+    return np.array([mv, rt, fire], dtype=np.float32)
 
 def dummy_agent(obs):
     return np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -306,14 +306,19 @@ def main():
 
     # ── 加载 AI ────────────────────────────────────────────────
     if os.path.exists(PPO_PATH):
-        ai_act = load_ppo_model(PPO_PATH)
-        model_src = "PPO"
-    elif os.path.exists(GA_PATH):
-        ai_act = load_ga_model(GA_PATH)
-        model_src = "GA"
+        try:
+            ai_act = load_ppo_model(PPO_PATH)
+            model_src = "PPO v5"
+            print(f"[OK] 加载 v5 分支模型: {PPO_PATH}")
+        except Exception as e:
+            print(f"[WARN] 模型加载失败 ({e})，使用智能随机代理")
+            ai_act = smart_random_agent
+            model_src = "SmartRandom(load failed)"
     else:
-        ai_act = random_agent
-        model_src = "Random(no model)"
+        print(f"[INFO] 未找到 {PPO_PATH}")
+        print("[INFO] 请先运行 train_ppo.py 完成训练，或将权重放入对应路径")
+        ai_act = smart_random_agent
+        model_src = "SmartRandom(no model)"
 
     # 对手模式循环：AI vs AI → AI vs Random → AI vs Dummy → Human vs AI
     MODES   = ["AI vs AI", "AI vs Random", "AI vs Dummy", "Human vs AI"]
@@ -321,7 +326,8 @@ def main():
     opp_fns = [ai_act, random_agent, dummy_agent, None]  # None = 人工控制
 
     env     = LinkCombatEnv()
-    obs     = env.reset(fixed_start=True)
+    env.set_mode(gallery=False, fixed=False) # 确保测试时是实战模式
+    obs     = env.reset(stage=3)             # stage 3 为全量实战
     paused  = False
     speed   = 1       # 游戏速度倍数（1=正常，5=最快）
     MAX_SP  = 10
@@ -337,7 +343,7 @@ def main():
 
     def reset_game():
         nonlocal obs, result_msg, result_timer
-        obs = env.reset(fixed_start=True)
+        obs = env.reset(stage=3)
         result_msg   = ""
         result_timer = 0
 

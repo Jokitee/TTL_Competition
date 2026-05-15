@@ -7,104 +7,118 @@
 #endif
 
 // ============================================================
-// 神经经网络推理：16输入 -> 64隐藏1 -> 48隐藏2 -> 32隐藏3 -> 7输出
-// 参数量: 6166，适配 STM32F103C8T6 (64KB Flash)
+// 神经网络推理 v5.0 — 分支架构 (Branched Architecture)
+// 架构: 16 -> Shared(64) -> [Offense(48), Tactical(48)]
+//                         -> [rt(3), fire(1)] , [mv(3)]
+// 参数量约: 7248，适配 STM32F103C8T6 (64KB Flash)
 //
-// 输出层（7维，全部离散动作）:
-//   actions[0~2] mv_logits  移动{停止, 前进, 后退}  → argmax → {-1, 0, +1}
-//   actions[3~5] rt_logits  旋转{不转, 左转, 右转}  → argmax → {-1, 0, +1}
-//   actions[6]   fire_logit 开火 logit              → >0 则开火
+// 设计理念:
+//   共享感知层提取通用几何特征，然后分叉为：
+//   - 进攻火控分支 (Offense): 专精炮塔旋转和开火时机 (含预判)
+//   - 战术走位分支 (Tactical): 专精底盘机动、绕后和残血规避
+//
+// 输出:
+//   actions[0] mv   底盘移动  {-1(后退), 0(停止), +1(前进)}
+//   actions[1] rt   炮塔旋转  {-1(右转), 0(不转), +1(左转)}
+//   actions[2] fire 开火      {0(不开火), 1(开火)}
 //
 // 观测输入（16维，与 Python get_relative_obs 严格一致）:
-//  obs[0]  dist         相对距离        (0~1)
-//  obs[1]  angle_diff   我方枪口误差    (-1~1，有符号)
+//  obs[0]  dist         相对距离归一化  (0~1)
+//  obs[1]  angle_diff   我方枪口误差    (-1~1)
 //  obs[2]  dx           X轴相对差       (-1~1)
 //  obs[3]  dy           Y轴相对差       (-1~1)
 //  obs[4]  self_hp      自身血量        (0~1)
 //  obs[5]  enemy_hp     敌人血量        (0~1)
 //  obs[6]  exposure     我方暴露系数    (0~1)
 //  obs[7]  wall_dist    最近墙距        (0~1)
-//  obs[8]  sin(self_a)  自身朝向sin     (-1~1)
-//  obs[9]  cos(self_a)  自身朝向cos     (-1~1)
-//  obs[10] sin(enemy_a) 敌人朝向sin     (-1~1)
-//  obs[11] cos(enemy_a) 敌人朝向cos     (-1~1)
-//  obs[12] self_cd      自身冷却状态    (0=可开火, 1=刚射击)
-//  obs[13] vel_along    敌方沿视线方向速度 (-1~1)
-//  obs[14] dist_rate    距离变化率       (-1~1)
-//  obs[15] vel_perp     敌方垂直视线速度 (-1~1，预判射击关键)
+//  obs[8]  sin(self_a)  自身朝向sin
+//  obs[9]  cos(self_a)  自身朝向cos
+//  obs[10] sin(enemy_a) 敌人朝向sin
+//  obs[11] cos(enemy_a) 敌人朝向cos
+//  obs[12] self_cd      冷却状态        (0=可开火)
+//  obs[13] vel_along    敌方沿视线速度  (-1~1)
+//  obs[14] dist_rate    距离变化率      (-1~1)
+//  obs[15] vel_perp     敌方垂直视线速度(-1~1，预判关键)
 // ============================================================
 
-// 离散动作映射：索引 → 实际动作值
-// mv: 0=停止(0), 1=前进(+1), 2=后退(-1)
-// rt: 0=不转(0), 1=左转(+1), 2=右转(-1)
 static const float MV_MAP[3] = {0.0f, 1.0f, -1.0f};
 static const float RT_MAP[3] = {0.0f, 1.0f, -1.0f};
 
 /**
- * @brief  神经网络推理（离散动作版）
+ * @brief  argmax — 从 n 个 logit 中返回最大值的索引
+ */
+static int argmax(const float *logits, int n) {
+    int best = 0;
+    for (int i = 1; i < n; i++)
+        if (logits[i] > logits[best]) best = i;
+    return best;
+}
+
+/**
+ * @brief  神经网络推理 v5.0 — 分支架构
  * @param  obs     16维归一化观测向量
  * @param  actions 3维输出 (mv, rt, fire)
- *                  mv/rt ∈ {-1, 0, +1}，fire ∈ {0, 1}
  */
 void nn_inference(const float obs[16], float actions[3]) {
-    float h1[64], h2[48], h3[32];
-    float logits[7];  // mv(3) + rt(3) + fire(1)
-
-    // 1. 输入层 → 隐藏层1 (16 → 64)
+    // ── Layer 1: 共享感知层 (16 -> 64) ──────────────────────────
+    float shared[64];
     for (int j = 0; j < 64; j++) {
-        h1[j] = B1[j];
-        for (int i = 0; i < 16; i++) h1[j] += obs[i] * W1[i][j];
-        h1[j] = tanhf(h1[j]);
+        shared[j] = B_Shared[j];
+        for (int i = 0; i < 16; i++)
+            shared[j] += obs[i] * W_Shared[i][j];
+        shared[j] = tanhf(shared[j]);
     }
 
-    // 2. 隐藏层1 → 隐藏层2 (64 → 48)
+    // ── Layer 2a: 进攻火控分支 (64 -> 48) ───────────────────────
+    // 专精炮塔旋转速度预判与开火时机
+    float offense[48];
     for (int j = 0; j < 48; j++) {
-        h2[j] = B2[j];
-        for (int i = 0; i < 64; i++) h2[j] += h1[i] * W2[i][j];
-        h2[j] = tanhf(h2[j]);
+        offense[j] = B_Offense[j];
+        for (int i = 0; i < 64; i++)
+            offense[j] += shared[i] * W_Offense[i][j];
+        offense[j] = tanhf(offense[j]);
     }
 
-    // 3. 隐藏层2 → 隐藏层3 (48 → 32)
-    for (int j = 0; j < 32; j++) {
-        h3[j] = B3[j];
-        for (int i = 0; i < 48; i++) h3[j] += h2[i] * W3[i][j];
-        h3[j] = tanhf(h3[j]);
+    // ── Layer 2b: 战术走位分支 (64 -> 48) ───────────────────────
+    // 专精底盘机动、绕后侧翼与残血规避
+    float tactical[48];
+    for (int j = 0; j < 48; j++) {
+        tactical[j] = B_Tactical[j];
+        for (int i = 0; i < 64; i++)
+            tactical[j] += shared[i] * W_Tactical[i][j];
+        tactical[j] = tanhf(tactical[j]);
     }
 
-    // 4. 隐藏层3 → 输出层 (32 → 7)
-    for (int j = 0; j < 7; j++) {
-        logits[j] = B4[j];
-        for (int i = 0; i < 32; i++) logits[j] += h3[i] * W4[i][j];
+    // ── Output: 炮塔旋转头 rt (Offense -> 3 logits) ─────────────
+    float rt_logits[3];
+    for (int j = 0; j < 3; j++) {
+        rt_logits[j] = B_Rt_Head[j];
+        for (int i = 0; i < 48; i++)
+            rt_logits[j] += offense[i] * W_Rt_Head[i][j];
     }
 
-    // 5. 离散动作：argmax 解码
-    //    mv_logits = logits[0..2], rt_logits = logits[3..5], fire_logit = logits[6]
+    // ── Output: 开火决策头 fire (Offense -> 1 logit) ─────────────
+    float fire_logit = B_Fire_Head[0];
+    for (int i = 0; i < 48; i++)
+        fire_logit += offense[i] * W_Fire_Head[i][0];
 
-    // mv argmax: 找 logits[0], logits[1], logits[2] 中最大值的索引
-    int mv_idx = 0;
-    if (logits[1] > logits[mv_idx]) mv_idx = 1;
-    if (logits[2] > logits[mv_idx]) mv_idx = 2;
+    // ── Output: 底盘移动头 mv (Tactical -> 3 logits) ─────────────
+    float mv_logits[3];
+    for (int j = 0; j < 3; j++) {
+        mv_logits[j] = B_Mv_Head[j];
+        for (int i = 0; i < 48; i++)
+            mv_logits[j] += tactical[i] * W_Mv_Head[i][j];
+    }
 
-    // rt argmax: 找 logits[3], logits[4], logits[5] 中最大值的索引
-    int rt_idx = 0;
-    if (logits[4] > logits[3]) rt_idx = 1;
-    if (logits[5] > logits[3 + rt_idx]) rt_idx = 2;
-
-    actions[0] = MV_MAP[mv_idx];   // 移动: -1, 0, +1
-    actions[1] = RT_MAP[rt_idx];   // 旋转: -1, 0, +1
-    actions[2] = (logits[6] > 0.0f) ? 1.0f : 0.0f;  // 开火
+    // ── 离散动作解码 ──────────────────────────────────────────────
+    actions[0] = MV_MAP[argmax(mv_logits, 3)];           // 底盘移动
+    actions[1] = RT_MAP[argmax(rt_logits, 3)];           // 炮塔旋转
+    actions[2] = (fire_logit > 0.0f) ? 1.0f : 0.0f;    // 开火
 }
 
 // ============================================================
 // 特征工程：绝对坐标 → 16维相对特征
 // 须与 Python get_relative_obs() 保持严格一致
-//
-// 参数:
-//   self_x/y/a/hp  — 自身 X,Y坐标,朝向角(度),血量(0~100)
-//   enemy_x/y/a/hp — 敌方 X,Y坐标,朝向角(度),血量(0~100)
-//   self_cd        — 自身冷却计数(0=可立即开火, fire_cooldown=刚射击)
-//   fire_cooldown  — 最大冷却计数(与训练时保持一致，通常为15)
-//   prev_dist      — 上一帧的距离（用于计算dist_rate，首次传入时设为-1）
 // ============================================================
 void process_game_data(float self_x,  float self_y,  float self_a,  float self_hp,
                        float enemy_x, float enemy_y, float enemy_a, float enemy_hp,
@@ -118,14 +132,14 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
     float dy   = enemy_y - self_y;
     float dist = sqrtf(dx*dx + dy*dy);
 
-    // 1. 我方枪口误差角（有符号，区分偏左/偏右）
+    // 1. 我方枪口误差角（有符号）
     float tgt_deg = atan2f(dy, dx) * 180.0f / M_PI;
     if (tgt_deg < 0.0f) tgt_deg += 360.0f;
     float angle_diff = fmodf((tgt_deg - self_a + 180.0f), 360.0f) - 180.0f;
 
-    // 2. 敌方枪口误差角 → 暴露系数
-    float etm_deg    = fmodf(tgt_deg + 180.0f, 360.0f);
-    float enemy_err  = fabsf(fmodf((etm_deg - enemy_a + 180.0f), 360.0f) - 180.0f);
+    // 2. 暴露系数（敌方护盾覆盖判断）
+    float etm_deg   = fmodf(tgt_deg + 180.0f, 360.0f);
+    float enemy_err = fabsf(fmodf((etm_deg - enemy_a + 180.0f), 360.0f) - 180.0f);
     float danger_cone;
     if (dist > PLAYER_RADIUS) {
         float r = PLAYER_RADIUS / dist;
@@ -143,7 +157,7 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
     for (int i = 1; i < 4; i++) if (walls[i] < min_wall) min_wall = walls[i];
     float wall_dist = min_wall / (ARENA_SIZE / 2.0f);
 
-    // 4. 朝向 sin/cos 编码（消除360→0°跳变）
+    // 4. 朝向 sin/cos 编码
     float rad_self  = self_a  * M_PI / 180.0f;
     float rad_enemy = enemy_a * M_PI / 180.0f;
 
@@ -152,50 +166,43 @@ void process_game_data(float self_x,  float self_y,  float self_a,  float self_h
     if (cd_norm > 1.0f) cd_norm = 1.0f;
     if (cd_norm < 0.0f) cd_norm = 0.0f;
 
-    // 6. 敌方沿视线方向速度分量（远程索敌关键特征）
-    float enemy_rad = rad_enemy;
-    float evx = cosf(enemy_rad) * PLAYER_SPEED;
-    float evy = sinf(enemy_rad) * PLAYER_SPEED;
-    float vel_along = 0.0f;
-    float vel_perp  = 0.0f;
+    // 6. 敌方速度分量（预判射击核心特征）
+    float evx = cosf(rad_enemy) * PLAYER_SPEED;
+    float evy = sinf(rad_enemy) * PLAYER_SPEED;
+    float vel_along = 0.0f, vel_perp = 0.0f;
     if (dist > 0.001f) {
-        vel_along = (evx * dx + evy * dy) / dist;
-        vel_perp  = (-evx * dy + evy * dx) / dist;  // 切向速度（预判射击关键）
-    }
-    vel_along /= PLAYER_SPEED;  // 归一化到 [-1, 1]
-    vel_perp  /= PLAYER_SPEED;  // 归一化到 [-1, 1]
-
-    // 7. 距离变化率（远程索敌关键特征）
-    float dist_rate = 0.0f;
-    if (prev_dist >= 0.0f) {
-        dist_rate = (dist - prev_dist) / (PLAYER_SPEED * 2.0f);
+        vel_along = (evx * dx + evy * dy) / dist / PLAYER_SPEED;
+        vel_perp  = (-evx * dy + evy * dx) / dist / PLAYER_SPEED;
     }
 
-    // 8. 组装16维观测向量
+    // 7. 距离变化率
+    float dist_rate = (prev_dist >= 0.0f) ? (dist - prev_dist) / (PLAYER_SPEED * 2.0f) : 0.0f;
+
+    // 8. 组装 16 维观测
     float obs[16] = {
-        dist / 707.0f,          // 0.  相对距离
-        angle_diff / 180.0f,    // 1.  我方枪口误差（有符号）
-        dx / ARENA_SIZE,        // 2.  dx
-        dy / ARENA_SIZE,        // 3.  dy
-        self_hp  / 100.0f,      // 4.  自身血量
-        enemy_hp / 100.0f,      // 5.  敌人血量
-        exposure,               // 6.  暴露系数
-        wall_dist,              // 7.  最近墙距
-        sinf(rad_self),         // 8.  自身朝向 sin
-        cosf(rad_self),         // 9.  自身朝向 cos
-        sinf(rad_enemy),        // 10. 敌人朝向 sin
-        cosf(rad_enemy),        // 11. 敌人朝向 cos
-        cd_norm,                // 12. 冷却状态（0=可开火）
-        vel_along,              // 13. 敌方沿视线方向速度（-1~1）
-        dist_rate,              // 14. 距离变化率（-1~1）
-        vel_perp                // 15. 敌方垂直视线速度（-1~1，预判射击关键）
+        dist / 707.0f,
+        angle_diff / 180.0f,
+        dx / ARENA_SIZE,
+        dy / ARENA_SIZE,
+        self_hp  / 100.0f,
+        enemy_hp / 100.0f,
+        exposure,
+        wall_dist,
+        sinf(rad_self),
+        cosf(rad_self),
+        sinf(rad_enemy),
+        cosf(rad_enemy),
+        cd_norm,
+        vel_along,
+        dist_rate,
+        vel_perp
     };
 
     float actions[3];
     nn_inference(obs, actions);
 
-    // actions[0] = mv ∈ {-1, 0, +1}
-    // actions[1] = rt ∈ {-1, 0, +1}
+    // actions[0] = mv   ∈ {-1, 0, +1}
+    // actions[1] = rt   ∈ {-1, 0, +1}
     // actions[2] = fire ∈ {0, 1}
     // send_to_uart(actions[0], actions[1], actions[2]);
 }

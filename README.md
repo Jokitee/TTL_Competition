@@ -1,111 +1,171 @@
-# Link-Combat STM32 AI Controller
+# 射击对战 AI — 灵动博弈系统 v5.0 (Combat AI v5.0)
 
-这是一个为 STM32 单片机设计的轻量级神经网络 AI 控制器，用于在 Link-Combat 机甲对战中实现智能走位、精准瞄准与自动防御。该项目包含 Python 端的强化学习/遗传算法训练环境，以及可以直接部署至单片机的 C 语言推理引擎。
+基于 **PPO + 课程学习 + 分支网络架构** 打造的高精度 2D 格斗 AI 项目。  
+训练完成的权重可一键导出为 C 头文件，直接部署到 **STM32 等嵌入式硬件**。
 
-## 🌟 核心特性 (Features)
+---
 
-* **极低资源占用**：16 -> 64 -> 48 -> 32 -> 7 的轻量级前馈神经网络（离散动作版 v3.0）。Flash 占用仅约 24.7KB，完美适配 STM32F103C8T6 等资源受限的 MCU。
-* **全离散动作空间**：移动(mv)和旋转(rt)均采用 Categorical 离散分布，与硬件执行完全一致（{-1, 0, +1}），彻底消除 sim-to-real gap。
-* **远程索敌优化**：新增敌方速度分量(vel_along)、距离变化率(dist_rate)和敌方切向速度(vel_perp)三个关键特征，使 AI 在远距离战斗中能预判敌方移动轨迹，大幅提升远程射击精度。
-* **智能攻击角度修正**：AI 模型在环境冷却期间会疯狂寻找最佳射击角度，只要冷却完毕就会开火，倒逼其实现 "完美死盯" 敌方的瞄准能力。
-* **智能护盾躲避与平移**：AI 模型自带子弹威胁预测，面对敌方射来的子弹时，会自主判断是进行**平移侧滑规避**，还是直接**180度转身用护盾硬接子弹**。
-* **增强自博弈训练**：采用对手池机制，每次训练时将当前模型加入对手池，后续训练自动与自身历史版本对战，确保模型持续进化。
-* **一键导出 C 代码**：训练完毕后，提供脚本将模型 `.pkl` 权重一键转换为 C 语言的 `model_weights.h` 数组。
+## 🧠 v5.0 核心架构：解耦分支网络 (Branched Architecture)
 
-## 📂 目录结构
+```
+输入层 (16维观测)
+    │
+    ▼
+[共享感知层] 16 → 64  (Shared Perception)
+  提取通用几何与物理特征
+    │
+    ├──────────────────────────────┐
+    ▼                              ▼
+[进攻火控分支] 64 → 48        [战术走位分支] 64 → 48
+ Offense Branch                  Tactical Branch
+ 专精炮塔旋转 & 开火时机          专精底盘机动 & 绕后侧翼
+    │                              │
+    ├── rt_head  → 3 (炮塔旋转)    └── mv_head → 3 (底盘移动)
+    └── fire_head → 1 (开火)
+```
 
-* `reward_config.py` / `train_config.py`: 结构化抽离的配置项文件，便于调整得分权重机制和训练超参数。
-* `analytics.py`: 训练过程的数据辅助统计脚本。
-* `realtime_plot.py`: **实时监控工具**。在训练进行时另起一个终端运行此脚本，可实时观察 AI 瞄准、规避等能力的百分比演进折线图。
-* `train_ppo.py` / `train_ga.py`: 分别使用 PPO 强化学习和遗传算法 (GA) 训练 AI 的脚本。
-* `human_vs_ai.py`: pygame 编写的 GUI 可视化测试与人机对战测试工具。
-* `human_vs_ai_train`: pygame 编写的人工强化训练工具，用户可以在PPO训练完毕后进行人工对局提高训练效果。
-* `export_to_c.py`: 将训练后的最优模型导出为 STM32 可用的头文件。
-* `nn_inference.c`: 纯 C 语言编写的单片机神经网络前向推理引擎及特征工程算子。
-* `uart_ai_handler.c`: STM32 串口 JSON 解析与调度器。
+> 传统单链网络中"射击梯度"和"走位梯度"互相干扰，导致 AI 既走不好也打不准。分支架构让两种技能**独立进化**，实现"走位时不忘瞄准，开火时不停位移"的双核战术执行力。
 
-## 🚀 快速上手 (Quick Start)
+---
 
-### 1. 训练你的 AI 模型
-你可以选择使用 PPO 或者 GA 进行训练。进入项目目录并运行：
-```bash
+## 🎓 4 阶段课程学习
+
+| 阶段 | 步数范围 | 训练内容 | AI 状态 |
+|------|---------|---------|--------|
+| **Stage 0** | 0 ~ 100万 | 近程快反 (距离 50-150) | 固定位置，练习 360° 极速转头 |
+| **Stage 1** | 100 ~ 300万 | 中程精准 (距离 150-300) | 固定位置，学习稳定追踪 |
+| **Stage 2** | 300 ~ 500万 | 远程预判 (距离 300-500) | 固定位置，强化打提前量能力 |
+| **Stage 3** | 500万+ | 全量实战 | 自由移动，自博弈死斗 |
+
+---
+
+## 📂 核心文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `train_ppo.py` | 主训练脚本，4 阶段课程学习，权重保存至 `best_model_v5_branched.pkl` |
+| `game_env.py` | 物理引擎 + 完整奖励塑形（含预判、侧翼、风筝逻辑） |
+| `reward_config.py` | 奖励分值配置，调整此文件可改变 AI 战术风格 |
+| `human_vs_ai.py` | 可视化对战工具，**按 'M' 键切换到 Human vs AI 亲自对战** |
+| `human_vs_ai_train.py` | 人机对战实时 PPO 在线学习 |
+| `realtime_plot.py` | 训练命中率实时监控图表 |
+| `migrate_weights.py` | 旧架构权重迁移工具（架构升级时保留训练成果） |
+| `export_to_c.py` | 将权重导出为 `model_weights.h` C 头文件 |
+| `nn_inference.c/h` | STM32 C 推理引擎（与 Python 完全对齐） |
+| `uart_ai_handler.c/h` | STM32 UART 通信 + 推理调度 |
+| `combat_logic.c` | 备用规则策略（用于回退/条试） |
+
+---
+
+## 🚀 训练使用流程
+
+### 第一步：（可选）从旧版本迁移权重
+如果之前已有训练好的旧版模型，先运行迁移工具保留已有成果：
+```powershell
+python migrate_weights.py
+```
+> 迁移完成后输出 `best_model_v5_branched.pkl`，感知层和分支层权重完美继承，输出头约 10~30 万步重新收敛。  
+> 若已有 `best_model_v5_branched.pkl`，脚本自动跳过，不会覆盖。
+
+### 第二步：开启特训
+```powershell
 python train_ppo.py
 ```
-*提示：在 `game_env.py` 中，我们强制了 `fr=1`，让 AI 能够专注于学习走位(mv)与旋转(rt)。*
+> 权重每 50 万步自动保存至 `best_model_v5_branched.pkl`。
 
-### 2. 导出模型到 C 语言头文件
-训练完成后，会生成 `.pkl` 文件。运行导出脚本：
-```bash
+### 第三步：实时监控命中率
+新开一个终端运行：
+```powershell
+python realtime_plot.py
+```
+> 在图表窗口按 **'C'** 清理历史数据，重新统计。
+
+### 第四步：人机对战验证
+```powershell
+python human_vs_ai.py
+```
+> 启动后按 **'M'** 切换模式，直到出现 `Human vs AI`。  
+> **W/S** 前后移动 | **A/D** 左右旋转 | **空格/F** 开火
+
+### 第五步：（可选）人机实时对练
+边打边训练，AI 会实时学习您的战术：
+```powershell
+python human_vs_ai_train.py
+```
+> 每积累 1024 步自动触发一次 PPO 更新，训练结果实时保存。
+
+---
+
+## 📦 硬件部署流程 (STM32)
+
+### 第一步：导出 C 权重文件
+训练完成后，运行：
+```powershell
 python export_to_c.py
 ```
-这会在当前目录生成一个 `model_weights.h`。
+自动生成 `model_weights.h`，内含所有神经网络权重的 C 浮点数组。
 
-### 3. 部署到 STM32 工程
-将以下三个文件拷贝至你的 STM32 工程目录中（如 `Core/Src` 及 `Core/Inc`）：
-1. `model_weights.h` (刚刚生成的权重文件)
-2. `nn_inference.c`、`nn_inference.h` (推理引擎及特征提取)
-3. `uart_ai_handler.c`、`uart_ai_handler.h`(串口通信调度)
+### 第二步：加入 STM32 工程
+将以下 4 个文件复制到 STM32 工程的 `Core/Src` 或 `AI/` 目录：
 
-### 4. STM32 代码集成
-在你的 `main.c` 中开启 UART1 接收中断：
+```
+model_weights.h      ← 网络权重（由 export_to_c.py 生成）
+nn_inference.c       ← 神经网络推理引擎（分支架构）
+nn_inference.h       ← 推理接口头文件
+uart_ai_handler.c    ← UART 通信 + 推理调度主控
+uart_ai_handler.h    ← 调度接口头文件
+```
 
+### 第三步：初始化 UART 中断
+在 `main.c` 中调用：
 ```c
 #include "uart_ai_handler.h"
 
-int main(void) {
-    // ... 其他初始化代码 ...
-    
-    // 初始化 AI 串口接收
-    AI_UART_Init();
-    
-    while (1) {
-        // ... 主循环 ...
-    }
-}
+// 在 main() 中的 while(1) 之前调用一次
+AI_UART_Init();
 ```
 
-在你的中断处理文件 `stm32f1xx_it.c` (或直接在 `main.c` 底部) 添加回调对接：
+### 第四步：注册中断回调
+在 `stm32xxxx_it.c` 的 `HAL_UART_RxCpltCallback` 中添加：
 ```c
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart->Instance == USART1) {
-        AI_UART_RxCallback(); 
+    if (huart->Instance == UART5) {   // 根据实际 UART 修改
+        AI_UART_RxCallback();
     }
 }
 ```
 
-## 📡 UART 通信协议
-
-STM32 通过 UART1 接收裁判系统或上位机发来的当前战局数据，随后立即回传 AI 动作。
-
-**上位机发给 STM32 (100ms 频率)**:
-```json
-{"p1":{"x":50.0,"y":50.0,"a":45.0,"hp":100},"p2":{"x":450.0,"y":450.0,"a":225.0,"hp":100}}
+### 第五步：配置阵营
+在 `uart_ai_handler.c` 顶部修改宏定义（决定我方是 P1 还是 P2）：
+```c
+#define AI_PLAY_AS_P2  1   // 0 = 我方是 P1，1 = 我方是 P2
 ```
 
-**STM32 发给上位机**:
-```json
-{"mv":1,"rt":-1,"fr":1}
-```
+### 通信协议
+| 方向 | 格式 | 示例 |
+|------|------|------|
+| 上位机 → STM32 | `{"p1":{"x":50,"y":50,"a":45,"hp":100},"p2":{...}}\n` | 每帧发送，以 `\n` 结尾 |
+| STM32 → 上位机 | `{"mv":1,"rt":0,"fr":1}\n` | `mv`/`rt` ∈ {-1,0,1}，`fr` ∈ {0,1} |
 
-## 🧠 神经网络架构设计 (v3.0 离散动作版)
+### 输出动作说明
+| 字段 | 含义 | 取值 |
+|------|------|------|
+| `mv` | 底盘前后移动 | `-1`(后退) / `0`(停止) / `+1`(前进) |
+| `rt` | 炮塔左右旋转 | `-1`(右转) / `0`(不转) / `+1`(左转) |
+| `fr` | 开火 | `0`(不开火) / `1`(开火) |
 
-* **输入层 (16维)**: 包含双方相对距离、角度偏差、相对坐标差、双方血量、自身冷却状态、暴露系数、距墙距离、敌方沿视线方向速度分量(vel_along)、距离变化率(dist_rate)、敌方切向速度(vel_perp)等。
-* **隐藏层**: 
-  - L1: 64神经元 (Tanh激活)
-  - L2: 48神经元 (Tanh激活)
-  - L3: 32神经元 (Tanh激活)
-* **输出层 (7维 logits，全部离散动作)**:
-  - `mv` (3类): 停止(0) / 前进(+1) / 后退(-1) → Categorical 分布 → argmax 解码
-  - `rt` (3类): 不转(0) / 左转(+1) / 右转(-1) → Categorical 分布 → argmax 解码
-  - `fr` (1维): 不开火(0) / 开火(1) → Bernoulli 分布
-* **动作映射表**: `MV_MAP = [0, +1, -1]`, `RT_MAP = [0, +1, -1]`
-* **总参数量**: ~6166 (Flash ≈ 24.7KB)
+---
 
-## 💡 开发提示
-* 如果你需要在 C 语言中维护冷却时间（避免 AI 发射频率超过游戏限制），请在 `uart_ai_handler.c` 中结合定时器中断自行对 `self_cd` 进行递减。
-* `combat_logic.c` 是一个不依赖神经网络的硬编码简单逻辑，如果你使用 AI 模型，则无需将该文件烧录进单片机。
+## 💡 常见问题
 
+**Q: AI 不开枪 / 命中率为 0？**  
+A: 检查 `reward_config.py` 中 `FIRE_PERFECT_AIM` 是否为正值（建议 ≥ 30.0）。若 `FIRE_BAD_AIM_PENALTY` 负值过大，AI 会因怕扣分而永远不敢开枪。
 
-## 改进方向
+**Q: AI 只转圈不打人？**  
+A: 降低 `EXPOSURE_REWARD_SCALE` 和 `TRACK_AIM_WEIGHT`，提高 `HIT_ENEMY` 权重，迫使 AI 追求实质伤害而非保持"占位姿势"。
 
-当前已经引入了智能规避机制与侧翼打击奖励 (`TACTICAL_FLANK`)，极大地丰富了 AI 的博弈空间。后续可通过继续调节 `reward_config.py` 中的比重，训练出不同战术流派的控制器。
+**Q: 训练/图表卡顿？**  
+A: 减少 `train_ppo.py` 中的 `N_ENVS`（16 → 8 或 4）；`realtime_plot.py` 已内置末尾 2000 行采样，图表无论日志多大都不会卡。
+
+**Q: STM32 接收到乱码或解析失败？**  
+A: 确认上位机发送的 JSON 格式与协议完全一致，字段名不能有多余空格，末尾必须有 `\n`。检查波特率是否与 CubeMX 中 UART 配置一致。

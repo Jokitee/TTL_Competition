@@ -1,7 +1,7 @@
 /**
  * uart_ai_handler.c
  * 
- * STM32 UART5 AI 推理接入代码 (离散动作版 v3.0)
+ * STM32 UART AI 推理接入代码 v5.0 — 分支架构版
  * 协议：接收游戏状态 -> 推理 -> 发送控制指令
  * 
  * 输入帧 (上位机→STM32): {"p1":{"x":50,"y":50,"a":45,"hp":100},"p2":{"x":50,"y":50,"a":45,"hp":100}}\n
@@ -134,15 +134,15 @@ static void process_uart_frame(char *frame) {
     vel_along /= PLAYER_SPEED;  // 归一化到 [-1, 1]
     vel_perp  /= PLAYER_SPEED;  // 归一化到 [-1, 1]
 
-    // 6. 距离变化率（远程索敌关键特征）
-    static float prev_dist = -1.0f;  // 跨帧保持
-    float dist_rate = 0.0f;
-    if (prev_dist >= 0.0f) {
-        dist_rate = (dist - prev_dist) / (PLAYER_SPEED * 2.0f);
-    }
-    prev_dist = dist;
-
-    // 7. 组装16维观测向量
+    // 5. 内部冷却计数器（跨帧保持）
+    // 训练时 fire_cooldown=15，每帧减 1，开火后重置为 15
+    static int  cd_counter  = 0;
+    static float prev_dist  = -1.0f;
+    
+    if (cd_counter > 0) cd_counter--;
+    float cd_norm = (float)cd_counter / 15.0f;
+    
+    // 6. 数据组装 — 16 维观测向量（与 Python get_relative_obs() 严格对齐）
     float obs[16] = {
         dist / 707.0f,          // 0.  相对距离
         angle_diff / 180.0f,    // 1.  我方枪口误差（有符号）
@@ -156,7 +156,7 @@ static void process_uart_frame(char *frame) {
         cosf(rad_self),         // 9.  自身朝向 cos
         sinf(rad_enemy),        // 10. 敌人朝向 sin
         cosf(rad_enemy),        // 11. 敌人朝向 cos
-        0.0f,                   // 12. CD 设为0
+        cd_norm,                // 12. 冷却状态（0=可开火）
         vel_along,              // 13. 敌方沿视线方向速度（-1~1）
         dist_rate,              // 14. 距离变化率（-1~1）
         vel_perp                // 15. 敌方垂直视线速度（-1~1，预判射击关键）
@@ -166,16 +166,17 @@ static void process_uart_frame(char *frame) {
     float actions[3];
     nn_inference(obs, actions);
 
-    // ================== 动作输出（已经是离散值）==================
-    // nn_inference 已返回离散动作:
-    //   actions[0] = mv ∈ {-1, 0, +1}
-    //   actions[1] = rt ∈ {-1, 0, +1}
-    //   actions[2] = fire ∈ {0, 1}
+    // ================== 动作输出（分支架构离散动作）==================
+    // actions[0] = mv ∈ {-1, 0, +1}  底盘移动
+    // actions[1] = rt ∈ {-1, 0, +1}  炮塔旋转
+    // actions[2] = fire ∈ {0, 1}      开火决策
     int mv = (int)actions[0];
     int rt = (int)actions[1];
     int fr = (actions[2] > 0.5f) ? 1 : 0;
+    
+    // 开火后重置冷却
+    if (fr) cd_counter = 15;
 
-    // 输出帧: {"mv":0,"rt":0,"fr":0}\n
     snprintf(tx_buf, TX_BUF_SIZE, "{\"mv\":%d,\"rt\":%d,\"fr\":%d}\n", mv, rt, fr);
     uart_send(tx_buf);
 }

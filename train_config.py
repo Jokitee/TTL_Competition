@@ -1,10 +1,10 @@
 class NetConfig:
-    """神经网络架构配置"""
-    IN = 13
+    """神经网络架构配置 (v3.0 离散版)"""
+    IN = 16   # dist, angle_diff, dx, dy, hp, hp_enemy, exposure, wall, sin_r, cos_r, sin_e, cos_e, cd, vel_along, dist_rate, vel_perp
     H1 = 64
     H2 = 48
     H3 = 32
-    OUT = 3
+    OUT = 7   # mv(3) + rt(3) + fire(1)
 
 class GATrainConfig:
     """遗传算法(GA)训练固定参数配置"""

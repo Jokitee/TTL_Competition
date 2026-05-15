@@ -1,12 +1,6 @@
 """
-train_ppo.py  —  PPO + 自博弈训练 v3.0 (离散动作版)
-架构: 16-64-48-32-7 (Actor-Critic 共享骨干网络)
-动作空间:
-  mv(移动):   Categorical{停止(0), 前进(+1), 后退(-1)}  → 3 logits
-  rt(旋转):   Categorical{不转(0), 左转(+1), 右转(-1)}  → 3 logits
-  fire(开火): Bernoulli(二值)                             → 1 logit
-全部动作离散化，与硬件执行完全一致，消除 sim-to-real gap
-导出权重与 nn_inference.c 完全兼容
+train_ppo.py  —  PPO + 课程学习打靶特训 v4.0 (极简高效网络版)
+架构优化: 16-64-64-7 (摒弃冗余的 48-32 层，使用强化学习标准双层宽网络，加速收敛)
 """
 import torch
 import torch.nn as nn
@@ -14,486 +8,240 @@ import torch.optim as optim
 import numpy as np
 from torch.distributions import Categorical, Bernoulli
 from game_env import LinkCombatEnv
-import copy, pickle, time, math
+import copy, pickle, time, math, os, random
+import analytics
 
-# ─── 设备自动检测 ───────────────────────────────────────────────
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: {device}", end='')
-if device.type == 'cuda':
-    print(f"  ({torch.cuda.get_device_name(0)})")
-else:
-    print("  (安装 CUDA 版 PyTorch 可启用 GPU 加速)")
+print(f"Device: {device}")
 
-# ─── 超参数 ──────────────────────────────────────────────────────
-IN_DIM  = 16   # 15维 + 新增vel_perp（敌方切向速度，预判射击关键）
-H1, H2, H3  = 64, 48, 32
-
+IN_DIM  = 16
+H1, H2  = 64, 64  # 优化网络：去除多余的 H3，使用经典的双层 64
 LR          = 3e-4
 GAMMA       = 0.99
 GAE_LAM     = 0.95
 CLIP_EPS    = 0.2
 VF_COEF     = 0.5
-ENT_COEF    = 0.001   # ↓ 从0.01降到0.001，防止策略变得过于随机
+ENT_COEF    = 0.05  # 提高探索率，防止 Stage 0/1 陷入「永远不开枪」局部最优
 MAX_GRAD    = 0.5
+N_ENVS      = 16
+N_STEPS     = 512
+BATCH_SIZE  = 256
+N_EPOCHS    = 10
 
-N_ENVS      = 16        # 并行环境数量
-N_STEPS     = 512       # 每次收集步数（总经验 = N_ENVS × N_STEPS = 8192）
-N_EPOCHS    = 8         # 每批经验的 PPO 更新轮数
-BATCH_SIZE  = 256       # minibatch 大小
-
-TOTAL_STEPS         = 10_000_000   # 总训练步数
-OPP_UPDATE_STEPS    = 50_000       # ↑ 每隔50k步将当前策略加入对手池（原100k，更频繁更新）
-OPP_POOL_MAX        = 30           # ↑ 对手池最大容量（原20，更多样性）
-OPP_LATEST_RATIO    = 0.4          # 选对手时，最新模型被选中的概率下限（确保自博弈强度）
-
-LOG_EVERY   = 10    # 每 N 次更新打印日志
-SAVE_EVERY  = 50    # 每 N 次更新保存模型
-
-SAVE_PATH   = "E:\\Test_FIre\\best_model_ppo.pkl"
-
-
-# ════════════════════════════════════════════════════════════════
-# Actor-Critic 网络（离散动作版 v3.0）
-# 骨干: Linear(16→64)→Tanh→Linear(64→48)→Tanh→Linear(48→32)→Tanh
-# Actor头: mv(3类), rt(3类) 均为 Categorical；fire(二值) Bernoulli
-# Critic头: value(标量)
-# 输入16维: dist, angle_diff, dx, dy, hp, hp_enemy, exposure, wall,
-#           sin_r, cos_r, sin_e, cos_e, cd, vel_along, dist_rate, vel_perp
-# 导出兼容性: W1(16×64)/B1/W2/B2/W3/B3/W4(32×7)/B4(7)
-# ════════════════════════════════════════════════════════════════
-
-# 离散动作映射表：索引 → 实际动作值
-# mv: 0=停止, 1=前进(+1), 2=后退(-1)
-# rt: 0=不转, 1=左转(+1), 2=右转(-1)
 MV_MAP = torch.tensor([0.0, 1.0, -1.0])
 RT_MAP = torch.tensor([0.0, 1.0, -1.0])
-
 
 class ActorCritic(nn.Module):
     def __init__(self):
         super().__init__()
-        # 共享骨干
-        self.backbone = nn.Sequential(
-            nn.Linear(IN_DIM, H1), nn.Tanh(),
-            nn.Linear(H1, H2),    nn.Tanh(),
-            nn.Linear(H2, H3),    nn.Tanh(),
+        # 1. 共享感知层 (Shared Perception): 提取环境的通用几何与物理特征
+        self.shared = nn.Sequential(
+            nn.Linear(IN_DIM, 64), nn.Tanh()
         )
-        # Actor 头（离散移动：3类 = 停止/前进/后退）
-        self.mv_head   = nn.Linear(H3, 3)
-        # Actor 头（离散旋转：3类 = 不转/左转/右转）
-        self.rt_head   = nn.Linear(H3, 3)
-        # Actor 头（离散开火：二值）
-        self.fire_head = nn.Linear(H3, 1)
-        # Critic 头
-        self.value_head = nn.Linear(H3, 1)
+        
+        # 2. 进攻火控分支 (Offensive Branch): 专精炮塔控制与击杀时机判断
+        self.offense_branch = nn.Sequential(
+            nn.Linear(64, 48), nn.Tanh()
+        )
+        self.rt_head   = nn.Linear(48, 3)  # 旋转炮塔
+        self.fire_head = nn.Linear(48, 1)  # 开火决策
+        
+        # 3. 战术走位分支 (Tactical Branch): 专精底盘机动、绕后侧翼与规避
+        self.tactical_branch = nn.Sequential(
+            nn.Linear(64, 48), nn.Tanh()
+        )
+        self.mv_head   = nn.Linear(48, 3)  # 移动控制
+        
+        # 4. 局势评估分支 (Critic Branch): 预测当前状态的胜率期望
+        self.critic_branch = nn.Sequential(
+            nn.Linear(64, 48), nn.Tanh(),
+            nn.Linear(48, 1)
+        )
 
-        # 正交初始化（PPO 经典初始化方案）
-        for m in self.backbone.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight, gain=math.sqrt(2))
-                nn.init.zeros_(m.bias)
-        for head in [self.mv_head, self.rt_head, self.fire_head]:
-            nn.init.orthogonal_(head.weight, gain=0.01)
-            nn.init.zeros_(head.bias)
-        nn.init.orthogonal_(self.value_head.weight, gain=1.0)
-        nn.init.zeros_(self.value_head.bias)
+    def _distributions(self, obs):
+        s_feat = self.shared(obs)
+        o_feat = self.offense_branch(s_feat)
+        t_feat = self.tactical_branch(s_feat)
+        
+        mv_dist   = Categorical(logits=self.mv_head(t_feat))
+        rt_dist   = Categorical(logits=self.rt_head(o_feat))
+        fire_dist = Bernoulli(logits=self.fire_head(o_feat).squeeze(-1))
+        return mv_dist, rt_dist, fire_dist, s_feat
 
-    def _features(self, obs):
-        return self.backbone(obs)
-
-    def get_value(self, obs):
-        return self.value_head(self._features(obs)).squeeze(-1)
-
-    def _distributions(self, feats):
-        mv_dist   = Categorical(logits=self.mv_head(feats))         # batch_shape: (B,)
-        rt_dist   = Categorical(logits=self.rt_head(feats))         # batch_shape: (B,)
-        fire_dist = Bernoulli(logits=self.fire_head(feats).squeeze(-1))  # batch_shape: (B,) ← 关键：squeeze 避免 (B,1) 广播问题
-        return mv_dist, rt_dist, fire_dist
+    def get_value(self, obs): 
+        return self.critic_branch(self.shared(obs)).squeeze(-1)
 
     def act(self, obs):
-        """采样动作（训练时使用）
-        返回: mv_mapped, rt_mapped, fire, mv_idx, rt_idx, logp, value
-          - mv_mapped/rt_mapped: 映射后的动作值 [-1,0,+1]，供 env.step 使用
-          - fire: 0 或 1
-          - mv_idx/rt_idx: 离散索引 {0,1,2}，供 buffer 存储和 evaluate 使用
-          - logp: 总 log 概率
-          - value: 状态价值估计
-        """
-        feats = self._features(obs)
-        mv_d, rt_d, fire_d = self._distributions(feats)
-        mv_idx = mv_d.sample().squeeze(-1)    # (B,) 整数 {0,1,2}
-        rt_idx = rt_d.sample().squeeze(-1)    # (B,) 整数 {0,1,2}
-        fire   = fire_d.sample().squeeze(-1)  # (B,) 0 或 1
-
-        logp = (mv_d.log_prob(mv_idx).squeeze(-1) +
-                rt_d.log_prob(rt_idx).squeeze(-1) +
-                fire_d.log_prob(fire).squeeze(-1))
-        value = self.value_head(feats).squeeze(-1)
-
-        # 将索引映射为实际动作值
-        _mv_map = MV_MAP.to(feats.device)
-        _rt_map = RT_MAP.to(feats.device)
-        mv_mapped = _mv_map[mv_idx]
-        rt_mapped = _rt_map[rt_idx]
-
-        return mv_mapped, rt_mapped, fire, mv_idx, rt_idx, logp, value
+        mv_d, rt_d, fire_d, s_feat = self._distributions(obs)
+        mv_idx = mv_d.sample().squeeze(-1)
+        rt_idx = rt_d.sample().squeeze(-1)
+        fire   = fire_d.sample().squeeze(-1)
+        logp = (mv_d.log_prob(mv_idx) + rt_d.log_prob(rt_idx) + fire_d.log_prob(fire))
+        value = self.critic_branch(s_feat).squeeze(-1)
+        _mv_map, _rt_map = MV_MAP.to(obs.device), RT_MAP.to(obs.device)
+        return _mv_map[mv_idx], _rt_map[rt_idx], fire, mv_idx, rt_idx, logp, value
 
     def evaluate(self, obs, mv_idx, rt_idx, fire):
-        """计算已存储动作的 log_prob、entropy、value（更新时使用）
-        参数 mv_idx/rt_idx 为离散索引（整数张量），fire 为 0/1 张量
-        """
-        feats = self._features(obs)
-        mv_d, rt_d, fire_d = self._distributions(feats)
-        logp = (mv_d.log_prob(mv_idx) +
-                rt_d.log_prob(rt_idx) +
-                fire_d.log_prob(fire)).squeeze(-1)
-        entropy = (mv_d.entropy() +
-                   rt_d.entropy() +
-                   fire_d.entropy()).squeeze(-1)
-        value = self.value_head(feats).squeeze(-1)
+        mv_d, rt_d, fire_d, s_feat = self._distributions(obs)
+        logp = (mv_d.log_prob(mv_idx) + rt_d.log_prob(rt_idx) + fire_d.log_prob(fire))
+        entropy = (mv_d.entropy() + rt_d.entropy() + fire_d.entropy())
+        value = self.critic_branch(s_feat).squeeze(-1)
         return logp, entropy, value
 
     def act_deterministic(self, obs_np):
-        """确定性动作（用于对手推理 / 最终部署）
-        返回 np.array([mv_mapped, rt_mapped, fire]) 其中 mv/rt ∈ {-1,0,+1}
-        """
         with torch.no_grad():
             obs = torch.FloatTensor(obs_np).unsqueeze(0).to(device)
-            feats = self._features(obs)
-            mv_idx = self.mv_head(feats).argmax(dim=-1).item()   # {0,1,2}
-            rt_idx = self.rt_head(feats).argmax(dim=-1).item()   # {0,1,2}
-            fire   = 1.0 if self.fire_head(feats).item() > 0 else 0.0
-        return np.array([MV_MAP[mv_idx].item(), RT_MAP[rt_idx].item(), fire],
-                        dtype=np.float32)
+            s_feat = self.shared(obs)
+            o_feat = self.offense_branch(s_feat)
+            t_feat = self.tactical_branch(s_feat)
+            
+            mv_idx = self.mv_head(t_feat).argmax(dim=-1).item()
+            rt_idx = self.rt_head(o_feat).argmax(dim=-1).item()
+            fire   = 1.0 if self.fire_head(o_feat).item() > 0 else 0.0
+        return np.array([MV_MAP[mv_idx].item(), RT_MAP[rt_idx].item(), fire], dtype=np.float32)
 
     def export_weights(self):
-        """
-        导出兼容 nn_inference.c 格式的权重字典:
-        W1(16×64) B1(64) W2(64×48) B2(48) W3(48×32) B3(32)
-        W4(32×7) B4(7) — 由三个 Actor 头拼接: mv(3)+rt(3)+fire(1)=7
-        """
-        W1 = self.backbone[0].weight.detach().cpu().numpy().T    # (16,64)
-        B1 = self.backbone[0].bias.detach().cpu().numpy()        # (64,)
-        W2 = self.backbone[2].weight.detach().cpu().numpy().T    # (64,48)
-        B2 = self.backbone[2].bias.detach().cpu().numpy()        # (48,)
-        W3 = self.backbone[4].weight.detach().cpu().numpy().T    # (48,32)
-        B3 = self.backbone[4].bias.detach().cpu().numpy()        # (32,)
-        # 拼接三个头 → W4(32,7) B4(7)
-        W4 = np.concatenate([
-            self.mv_head.weight.detach().cpu().numpy().T,        # (32,3)
-            self.rt_head.weight.detach().cpu().numpy().T,        # (32,3)
-            self.fire_head.weight.detach().cpu().numpy().T,      # (32,1)
-        ], axis=1)                                               # (32,7)
-        B4 = np.concatenate([
-            self.mv_head.bias.detach().cpu().numpy(),            # (3,)
-            self.rt_head.bias.detach().cpu().numpy(),            # (3,)
-            self.fire_head.bias.detach().cpu().numpy(),          # (1,)
-        ])                                                       # (7,)
-        return [W1, B1, W2, B2, W3, B3, W4, B4]
+        # 导出为扁平化列表，方便 C 语言加载
+        weights = []
+        for seq in [self.shared, self.offense_branch, self.tactical_branch]:
+            weights.append(seq[0].weight.detach().cpu().numpy().T)
+            weights.append(seq[0].bias.detach().cpu().numpy())
+        
+        # 导出输出头
+        weights.append(self.mv_head.weight.detach().cpu().numpy().T)
+        weights.append(self.mv_head.bias.detach().cpu().numpy())
+        weights.append(self.rt_head.weight.detach().cpu().numpy().T)
+        weights.append(self.rt_head.bias.detach().cpu().numpy())
+        weights.append(self.fire_head.weight.detach().cpu().numpy().T)
+        weights.append(self.fire_head.bias.detach().cpu().numpy())
+        return weights
 
-
-# ════════════════════════════════════════════════════════════════
-# 奖励归一化（Running Mean/Std）
-# 将奖励缩放到均值≈0、方差≈1，解决 vf loss 过高问题
-# ════════════════════════════════════════════════════════════════
-class RunningStats:
-    """Welford 在线算法，跟踪奖励的均值和方差"""
-    def __init__(self):
-        self.n    = 0
-        self.mean = 0.0
-        self.M2   = 1.0   # 初始方差估计
-
-    def update_and_normalize(self, rewards: np.ndarray) -> np.ndarray:
-        for r in rewards.flatten():
-            self.n += 1
-            delta      = r - self.mean
-            self.mean += delta / self.n
-            delta2     = r - self.mean
-            self.M2   += delta * delta2
-        std = math.sqrt(self.M2 / max(self.n, 1)) + 1e-8
-        return rewards / std
-
-
-# 全局奖励归一化实例（跨 rollout 持续更新）
-reward_stats = RunningStats()
-
-
-# ════════════════════════════════════════════════════════════════
-# 广义优势估计（GAE）
-# ════════════════════════════════════════════════════════════════
-def compute_gae(rewards, values, dones, last_value, gamma=GAMMA, lam=GAE_LAM):
-    """
-    rewards: (T, N_ENVS)
-    values:  (T, N_ENVS)
-    dones:   (T, N_ENVS)
-    last_value: (N_ENVS,)
-    returns: advantages (T×N_ENVS,), returns (T×N_ENVS,)
-    """
+def compute_gae(rewards, values, dones, last_value):
     T, N = rewards.shape
     advantages = np.zeros_like(rewards)
     last_gae = np.zeros(N)
     for t in reversed(range(T)):
         next_val = last_value if t == T-1 else values[t+1]
-        next_non_terminal = 1.0 - dones[t]
-        delta = rewards[t] + gamma * next_val * next_non_terminal - values[t]
-        last_gae = delta + gamma * lam * next_non_terminal * last_gae
+        delta = rewards[t] + 0.99 * next_val * (1.0 - dones[t]) - values[t]
+        last_gae = delta + 0.99 * 0.95 * (1.0 - dones[t]) * last_gae
         advantages[t] = last_gae
-    returns = advantages + values
-    return advantages.flatten(), returns.flatten()
+    return advantages.flatten(), (advantages + values).flatten()
 
-
-# ════════════════════════════════════════════════════════════════
-# PPO 更新
-# ════════════════════════════════════════════════════════════════
-def ppo_update(policy, optimizer, batch):
-    obs_b, mv_b, rt_b, fire_b, logp_old_b, adv_b, ret_b = [
-        torch.FloatTensor(x).to(device) for x in batch
-    ]
-    # 标准化优势（降低方差）
-    adv_b = (adv_b - adv_b.mean()) / (adv_b.std() + 1e-8)
-
-    total_loss = pg_loss = vf_loss = ent_loss = 0.0
-    n_batches = 0
-    idx = np.arange(len(obs_b))
-
-    for _ in range(N_EPOCHS):
-        np.random.shuffle(idx)
-        for start in range(0, len(idx), BATCH_SIZE):
-            mb = idx[start:start+BATCH_SIZE]
-            logp, entropy, value = policy.evaluate(
-                obs_b[mb], mv_b[mb], rt_b[mb], fire_b[mb])
-
-            ratio = (logp - logp_old_b[mb]).exp()
-            pg1   = ratio * adv_b[mb]
-            pg2   = ratio.clamp(1-CLIP_EPS, 1+CLIP_EPS) * adv_b[mb]
-            l_pg  = -torch.min(pg1, pg2).mean()
-            l_vf  =  0.5 * (value - ret_b[mb]).pow(2).mean()
-            l_ent = -entropy.mean()
-
-            loss = l_pg + VF_COEF * l_vf + ENT_COEF * l_ent
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), MAX_GRAD)
-            optimizer.step()
-
-            total_loss += loss.item()
-            pg_loss    += l_pg.item()
-            vf_loss    += l_vf.item()
-            ent_loss   += l_ent.item()
-            n_batches  += 1
-
-    n = max(n_batches, 1)
-    return total_loss/n, pg_loss/n, vf_loss/n, ent_loss/n
-
-
-# ════════════════════════════════════════════════════════════════
-# 经验收集（N_ENVS 并行环境）
-# ════════════════════════════════════════════════════════════════
-def collect_rollouts(policy, envs, obs_list, opponent_fn):
-    """
-    采集 N_STEPS × N_ENVS 步经验。
-    opponent_fn(obs_np) → action_np，使用对手策略。
-    """
-    N = len(envs)
-    T = N_STEPS
-
-    all_obs    = np.zeros((T, N, IN_DIM), dtype=np.float32)
-    all_mv_idx = np.zeros((T, N), dtype=np.float32)   # 离散索引 {0,1,2}
-    all_rt_idx = np.zeros((T, N), dtype=np.float32)   # 离散索引 {0,1,2}
-    all_fire   = np.zeros((T, N), dtype=np.float32)
-    all_logp   = np.zeros((T, N), dtype=np.float32)
-    all_val    = np.zeros((T, N), dtype=np.float32)
-    all_rew    = np.zeros((T, N), dtype=np.float32)
-    all_done   = np.zeros((T, N), dtype=np.float32)
-
-    episode_rewards = []
-    ep_buf = np.zeros(N, dtype=np.float32)
+def collect_rollouts(policy, envs, obs_list, opponent_fn, stage=3, turret_only=False):
+    """turret_only=True 时强制 mv=0，只训练炮塔旋转和开火，消除走位梯度干扰"""
+    T, N = N_STEPS, len(envs)
+    buf = {k: np.zeros((T, N, IN_DIM) if k=='obs' else (T, N)) for k in ['obs','mv','rt','fire','logp','val','rew','done']}
+    ep_rews = []
+    ep_buf = np.zeros(N)
 
     for t in range(T):
         obs_tensor = torch.FloatTensor(np.stack(obs_list)).to(device)
         with torch.no_grad():
             mv, rt, fire, mv_idx, rt_idx, logp, value = policy.act(obs_tensor)
-
-        mv_np      = mv.cpu().numpy()        # 映射后动作值 {-1,0,+1}
-        rt_np      = rt.cpu().numpy()        # 映射后动作值 {-1,0,+1}
-        fire_np    = fire.cpu().numpy()
-        mv_idx_np  = mv_idx.cpu().numpy()    # 离散索引 {0,1,2}
-        rt_idx_np  = rt_idx.cpu().numpy()    # 离散索引 {0,1,2}
-        logp_np    = logp.cpu().numpy()
-        val_np     = value.cpu().numpy()
+        
+        mv_np, rt_np, fire_np = mv.cpu().numpy(), rt.cpu().numpy(), fire.cpu().numpy()
+        mv_idx_np, rt_idx_np, logp_np, val_np = mv_idx.cpu().numpy(), rt_idx.cpu().numpy(), logp.cpu().numpy(), value.cpu().numpy()
 
         for i, env in enumerate(envs):
-            obs2    = env.get_relative_obs(env.p2, env.p1)
+            obs2 = env.get_relative_obs(env.p2, env.p1)
             action2 = opponent_fn(obs2)
-            action1 = np.array([mv_np[i], rt_np[i], fire_np[i]], dtype=np.float32)
+            # 炮塑锁定模式：底盘不动，只训练炮塔（Stage 0 关键优化）
+            mv_val = 0.0 if turret_only else mv_np[i]
+            action1 = np.array([mv_val, rt_np[i], fire_np[i]])
+            # 记录的 mv_idx 保持原样，使策略梯度不被截断
             next_obs, reward, done = env.step(action1, action2)
 
-            all_obs[t, i]    = obs_list[i]
-            all_mv_idx[t, i] = mv_idx_np[i]   # 存储离散索引（供 evaluate 使用）
-            all_rt_idx[t, i] = rt_idx_np[i]   # 存储离散索引（供 evaluate 使用）
-            all_fire[t, i]   = fire_np[i]
-            all_logp[t, i]   = logp_np[i]
-            all_val[t, i]    = val_np[i]
-            all_rew[t, i]    = reward
-            all_done[t, i]   = float(done)
-            ep_buf[i]        += reward
-
+            buf['obs'][t,i], buf['mv'][t,i], buf['rt'][t,i], buf['fire'][t,i] = obs_list[i], mv_idx_np[i], rt_idx_np[i], fire_np[i]
+            buf['logp'][t,i], buf['val'][t,i], buf['rew'][t,i], buf['done'][t,i] = logp_np[i], val_np[i], reward, float(done)
+            ep_buf[i] += reward
             if done:
-                episode_rewards.append(ep_buf[i])
-                ep_buf[i] = 0.0
-                obs_list[i] = env.reset()
-            else:
-                obs_list[i] = next_obs
+                ep_rews.append(ep_buf[i]); ep_buf[i] = 0.0
+                obs_list[i] = env.reset(stage=stage)
+            else: obs_list[i] = next_obs
 
-    # 奖励归一化（解决 vf loss 过高问题，将奖励缩放到合理范围）
-    all_rew = reward_stats.update_and_normalize(all_rew)
-
-    # 最后一步的 bootstrap value
-    obs_tensor = torch.FloatTensor(np.stack(obs_list)).to(device)
     with torch.no_grad():
-        last_val = policy.get_value(obs_tensor).cpu().numpy()
+        last_val = policy.get_value(torch.FloatTensor(np.stack(obs_list)).to(device)).cpu().numpy()
+    adv, ret = compute_gae(buf['rew'], buf['val'], buf['done'], last_val)
+    batch = (buf['obs'].reshape(-1, IN_DIM), buf['mv'].flatten(), buf['rt'].flatten(), buf['fire'].flatten(), buf['logp'].flatten(), adv, ret)
+    return batch, obs_list, np.mean(ep_rews) if ep_rews else 0.0
 
-    advantages, returns = compute_gae(all_rew, all_val, all_done, last_val)
+class RunningStats:
+    def __init__(self):
+        self.n = 0
+        self.mean = 0.0
+        self.M2 = 1.0
 
-    batch = (
-        all_obs.reshape(-1, IN_DIM),
-        all_mv_idx.flatten(),
-        all_rt_idx.flatten(),
-        all_fire.flatten(),
-        all_logp.flatten(),
-        advantages,
-        returns,
-    )
-    mean_ep_rew = np.mean(episode_rewards) if episode_rewards else 0.0
-    return batch, obs_list, mean_ep_rew
+    def update_and_normalize(self, rewards: np.ndarray) -> np.ndarray:
+        for r in rewards.flatten():
+            self.n += 1
+            delta = r - self.mean
+            self.mean += delta / self.n
+            delta2 = r - self.mean
+            self.M2 += delta * delta2
+        std = math.sqrt(self.M2 / max(self.n, 1)) + 1e-8
+        return rewards / std
 
-
-# ════════════════════════════════════════════════════════════════
-# 主训练循环
-# ════════════════════════════════════════════════════════════════
-def train(mode_name="default", max_steps=4000000):
-    policy    = ActorCritic().to(device)
-    optimizer = optim.Adam(policy.parameters(), lr=LR, eps=1e-5)
-
-    # 线性学习率衰减
-    total_updates = max_steps // (N_ENVS * N_STEPS)
-    scheduler = optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1.0, end_factor=0.1,
-        total_iters=total_updates)
-
-    # 对手池：初始为当前策略的拷贝
-    opponent_pool = [copy.deepcopy(policy)]
-    opponent_pool[-1].eval()
-
-    def sample_opponent_fn():
-        """
-        从对手池随机选一个，近期模型被选概率更高。
-        OPP_LATEST_RATIO 保证最新模型至少有指定概率被选中。
-        对手使用 epsilon-greedy 策略：大部分时间确定性动作，小概率随机动作（增加多样性）。
-        """
-        n = len(opponent_pool)
-        # 基础权重：线性递增
-        weights = np.linspace(1.0, 3.0, n)
-        # 最新模型强制加权到 OPP_LATEST_RATIO
-        weights[-1] = max(weights[-1], OPP_LATEST_RATIO * weights.sum() / (1.0 - OPP_LATEST_RATIO + 1e-8))
-        weights /= weights.sum()
-        opp = opponent_pool[np.random.choice(n, p=weights)]
-        def fn(obs_np):
-            # 离散动作：epsilon-greedy 增加对手多样性
-            if np.random.random() < 0.1:
-                # 10% 概率随机动作
-                mv   = np.random.choice([-1.0, 0.0, 1.0])
-                rt   = np.random.choice([-1.0, 0.0, 1.0])
-                fire = 1.0 if np.random.random() < 0.6 else 0.0
-                return np.array([mv, rt, fire], dtype=np.float32)
-            else:
-                # 90% 概率确定性动作
-                action = opp.act_deterministic(obs_np)
-                # 对手更积极开火（降低开火阈值）
-                action[2] = 1.0 if action[2] > 0.0 else 0.0
-                return action
-        return fn
-
-    # 初始化环境
-    envs     = [LinkCombatEnv() for _ in range(N_ENVS)]
-    obs_list = [env.reset() for env in envs]
-
-    total_steps  = 0
-    update_count = 0
-    best_reward  = -float('inf')
-    t0 = time.time()
-
-    n_params = sum(p.numel() for p in policy.parameters())
-    print("=" * 65)
-    print(f"PPO 离散动作训练 v3.0")
-    print(f"  网络: {IN_DIM}-{H1}-{H2}-{H3}-7 (mv3+rt3+fire1)  参数量: {n_params}")
-    print(f"  动作: mv=[停/进/退] rt=[不/左/右] fire=[是/否]")
-    print(f"  N_ENVS={N_ENVS}  N_STEPS={N_STEPS}  总批量={N_ENVS*N_STEPS}/次更新")
-    print(f"  模式: {mode_name} | 目标步数: {max_steps:,}")
-    print("=" * 65)
-
-    opp_fn = sample_opponent_fn()
-
-    while total_steps < max_steps:
-        policy.train()
-        batch, obs_list, ep_rew = collect_rollouts(policy, envs, obs_list, opp_fn)
-        policy.train()
-
-        loss, pg, vf, ent = ppo_update(policy, optimizer, batch)
-        scheduler.step()
-
-        total_steps  += N_ENVS * N_STEPS
-        update_count += 1
-
-        # 更新对手池
-        if total_steps % OPP_UPDATE_STEPS < N_ENVS * N_STEPS:
-            snap = copy.deepcopy(policy); snap.eval()
-            opponent_pool.append(snap)
-            if len(opponent_pool) > OPP_POOL_MAX:
-                opponent_pool.pop(0)
-            opp_fn = sample_opponent_fn()   # 重新采样
-
-        # 日志
-        if update_count % LOG_EVERY == 0:
-            elapsed  = time.time() - t0
-            sps      = total_steps / elapsed
-            lr_now   = optimizer.param_groups[0]['lr']
-            print(f"Steps {total_steps:>8,} | "
-                  f"Reward {ep_rew:>8.1f} | "
-                  f"Loss {loss:>6.3f} (pg={pg:.3f} vf={vf:.3f} ent={ent:.3f}) | "
-                  f"LR {lr_now:.2e} | "
-                  f"Pool {len(opponent_pool)} | "
-                  f"{sps:.0f}sps")
-
-        # 保存
-        if update_count % SAVE_EVERY == 0 or ep_rew > best_reward:
-            if ep_rew > best_reward:
-                best_reward = ep_rew
-            weights = policy.export_weights()
-            save_path = f"E:\\Test_FIre\\best_model_ppo_{mode_name}.pkl"
-            with open(save_path, 'wb') as f:
-                pickle.dump(weights, f)
-
-    # 最终保存
-    weights = policy.export_weights()
-    save_path = f"E:\\Test_FIre\\best_model_ppo_{mode_name}.pkl"
-    with open(save_path, 'wb') as f:
-        pickle.dump(weights, f)
-    print(f"\n[{mode_name}] 训练完成！最佳奖励: {best_reward:.1f}")
-    print(f"权重已保存至 {save_path}")
-    print(f"运行 export_to_c.py 生成 model_weights.h（替换 SAVE_PATH 为 {save_path}）")
-
-
-if __name__ == "__main__":
-    from reward_config import RewardConfig
+def ppo_update(policy, optimizer, batch):
+    obs_b, mv_b, rt_b, fire_b, lp_b, adv_b, ret_b = [torch.FloatTensor(x).to(device) for x in batch]
+    adv_b = (adv_b - adv_b.mean()) / (adv_b.std() + 1e-8)
     
-    print(f"\n\n{'='*20} 开始训练: 动态距离感知攻击专用模型 {'='*20}")
+    total_loss = pg_loss = vf_loss = ent_loss = 0.0
+    n_batches = 0
     
-    # 动态修改奖励配置(如果需要，确保BOUNCE_EXPLOIT关闭)
-    setattr(RewardConfig, "BOUNCE_EXPLOIT", False)
+    for _ in range(N_EPOCHS):
+        idx = np.random.permutation(len(obs_b))
+        for s in range(0, len(idx), BATCH_SIZE):
+            mb = idx[s:s+BATCH_SIZE]
+            lp, ent, v = policy.evaluate(obs_b[mb], mv_b[mb], rt_b[mb], fire_b[mb])
+            ratio = (lp - lp_b[mb]).exp()
+            surr1 = ratio * adv_b[mb]
+            surr2 = ratio.clamp(1-CLIP_EPS, 1+CLIP_EPS) * adv_b[mb]
+            l_pg = -torch.min(surr1, surr2).mean()
+            l_vf = VF_COEF * (v - ret_b[mb]).pow(2).mean()
+            l_ent = -ENT_COEF * ent.mean()
+            
+            loss = l_pg + l_vf + l_ent
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(policy.parameters(), MAX_GRAD)
+            optimizer.step()
+            
+            total_loss += loss.item()
+            pg_loss += l_pg.item()
+            vf_loss += l_vf.item()
+            ent_loss += l_ent.item()
+            n_batches += 1
+            
+    n = max(n_batches, 1)
+    return total_loss/n, pg_loss/n, vf_loss/n, ent_loss/n
+
+def train(max_steps=15_000_000):
+    policy = ActorCritic().to(device)
+    # 因为架构全面升级为分支网络，使用 v5 命名
+    save_path = "E:\\Test_FIre\\best_model_v5_branched.pkl"
+    if os.path.exists(save_path):
+        try:
+            with open(save_path, "rb") as f:
+                w = pickle.load(f)
+            with torch.no_grad():
+                # 按照 export_weights 的顺序反向加载
+                policy.shared[0].weight.copy_(torch.FloatTensor(w[0].T))
+                policy.shared[0].bias.copy_(torch.FloatTensor(w[1]))
+                policy.offense_branch[0].weight.copy_(torch.FloatTensor(w[2].T))
+                policy.offense_branch[0].bias.copy_(torch.FloatTensor(w[3]))
+                policy.tactical_branch[0].weight.copy_(torch.FloatTensor(w[4].T))
+                policy.tactical_branch[0].bias.copy_(torch.FloatTensor(w[5]))
+                
+                policy.mv_head.weight.copy_(torch.FloatTensor(w[6].T))
+                policy.mv_head.bias.copy_(torch.FloatTensor(w[7]))
+                policy.rt_head.weight.copy_(torch.FloatTensor(w[8].T))
+                policy.rt_head.bias.copy_(torch.FloatTensor(w[9]))
+                policy.fire_head.weight.copy_(torch.FloatTensor(w[10].T))
+                policy.fire_head.bias.copy_(torch.FloatTensor(w[11]))
+            print(f"Loaded {save_path}")
+        except Exception as e:
+            print(f"Start from scratch. Reason: {e}")
     
-    # 重置全局奖励归一化
-    reward_stats = RunningStats()
-    
-    # 将模型精简为单一的动态攻击专用模型
-    train(mode_name="dynamic_attacker", max_steps=10_000_000)
+    optimizer = optim.Adam(policy.parameters(), lr=LR)
+    envs = [LinkCombatEnv() for _ in range(N_ENVS)]
+    obs_list = [env.reset(stage=0) for env in envs]
